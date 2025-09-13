@@ -1,0 +1,7 @@
+extruder_node:
+  ros__parameters:
+    backend: "sim"         # "sim" | "serial"
+    serial_port: "/dev/ttyUSB0"
+    serial_baud: 115200
+    max_rate_mlps: 3.0     # batas laju ml/s
+    control_hz: 100.0
