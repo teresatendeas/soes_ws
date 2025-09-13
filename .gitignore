@@ -1,0 +1,19 @@
+# ROS 2
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+
+# Virtual env & IDE
+.venv/
+.idea/
+.vscode/
+*.code-workspace
+
+# Misc
+*.swp
+.DS_Store
+.env
