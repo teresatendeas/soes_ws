@@ -13,7 +13,7 @@ The workspace contains all core components: vision detection, inverse kinematics
 | **soes_state** | Core **state machine** controlling system logic, sequencing extrusion, and commanding pump actions. |
 | **soes_robothand** | Generates **spiral trajectories** and performs **inverse kinematics** for the 4-DOF arm. |
 | **soes_vision** | Handles **camera detection** — publishes simple `True/False` for tray or dough presence. |
-| **soes_msgs** *(optional)* | Defines custom messages/services if you later need them (e.g., `Angles.msg`, `StartStop.srv`). |
+| **soes_msgs** | Defines custom messages/services if you later need them (e.g., `Angles.msg`, `StartStop.srv`). |
 
 
 ## ⚙️ Quick Start
@@ -28,5 +28,6 @@ source install/setup.bash
 
 # Launch the full system
 ros2 launch soes_bringup bringup.launch.py
+
 
 
