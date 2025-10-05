@@ -1,0 +1,42 @@
+# === ROS 2 build artifacts ===
+build/
+install/
+log/
+
+# === Python bytecode & cache ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+*.log
+
+# === Colcon / Ament / CMake ===
+.colcon/
+CTestTestfile.cmake
+CMakeFiles/
+cmake_install.cmake
+Makefile
+ament_cmake_core/
+ament_cmake_index/
+colcon.meta
+
+# === VSCode / JetBrains IDE configs (optional) ===
+.vscode/
+.idea/
+
+# === System files ===
+.DS_Store
+Thumbs.db
+
+# === Temporary or local notes ===
+*.swp
+*.bak
+*.tmp
+*.orig
+
+# === ROS launch/test results ===
+*.xml
+*.yaml~
+
