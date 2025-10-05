@@ -13,10 +13,6 @@ soes_ws/
 │ ├─ soes_state/ → main system logic & state machine
 │ ├─ soes_robothand/ → spiral generator + inverse kinematics
 │ └─ soes_vision/ → camera detection node
-
-yaml
-Copy code
-
 ---
 
 ## ⚙️ Quick Start
@@ -31,3 +27,4 @@ source install/setup.bash
 
 # Launch the full system
 ros2 launch soes_bringup bringup.launch.py
+
