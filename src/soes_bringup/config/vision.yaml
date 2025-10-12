@@ -1,5 +1,21 @@
 soes_vision:
   ros__parameters:
-    camera_id: 0
-    threshold: 0.5
-    show_debug: True
+    # dummy publishers (no camera yet)
+    publish_rate_hz: 5.0
+    frame_id: "robot_base"
+
+    # three target centers in meters (x, y, z) — left, center, right
+    centers_m:
+      - 0.22  # left.x
+      - 0.05  # left.y
+      - 0.10  # left.z
+      - 0.20  # center.x
+      - 0.00  # center.y
+      - 0.10  # center.z
+      - 0.22  # right.x
+      - -0.05 # right.y
+      - 0.10  # right.z
+
+    # simple quality model (dummy)
+    diameter_mean_mm: [30.0, 30.0, 30.0]
+    quality_tolerance_mm: 3.0

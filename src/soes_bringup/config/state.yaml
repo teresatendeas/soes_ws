@@ -1,8 +1,14 @@
 soes_state:
   ros__parameters:
-    pump_on_s: 2.0
-    settle_s: 0.5
+    # timing
+    pump_on_s: 2.0          # pump ON duration at each position
+    settle_s: 0.5           # settle time after index change
+    camera_timeout_s: 2.0   # wait time in CAMERA state
+
+    # order the three targets will be processed (indices expected by robothand)
+    # 0 = left, 1 = center, 2 = right (or whatever your motion node uses)
     order: [1, 0, 2]
+
+    # roller command used in ROLL_TRAY
     roller_distance_mm: 100.0
     roller_speed_mm_s: 40.0
-    camera_timeout_s: 2.0

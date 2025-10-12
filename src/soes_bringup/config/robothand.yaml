@@ -1,5 +1,4 @@
 soes_robothand:
   ros__parameters:
-    link_lengths_mm: [120.0, 120.0, 80.0]
-    control_rate_hz: 50.0
-    default_spiral: [6.0, 18.0, 1.5, 12.0, 3.14]
+    # stream rate for publishing /arm/joint_targets (dummy IK for now)
+    control_rate_hz: 20.0
