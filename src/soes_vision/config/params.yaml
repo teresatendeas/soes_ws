@@ -1,0 +1,3 @@
+soes_vision:
+  ros__parameters:
+    dummy_param: true

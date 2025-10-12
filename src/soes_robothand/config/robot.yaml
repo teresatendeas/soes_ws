@@ -1,0 +1,3 @@
+soes_robothand:
+  ros__parameters:
+    dummy_param: true
