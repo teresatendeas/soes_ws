@@ -1,0 +1,4 @@
+bool start                  # true=start auto cycle, false=stop
+---
+bool accepted
+string message

@@ -1,0 +1,4 @@
+soes_msgs/SpiralParams params
+---
+bool accepted
+string message

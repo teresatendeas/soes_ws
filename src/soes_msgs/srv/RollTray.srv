@@ -1,0 +1,5 @@
+float32 distance_mm
+float32 speed_mm_s
+---
+bool done
+string message
