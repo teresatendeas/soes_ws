@@ -29,4 +29,11 @@ def generate_launch_description():
             output='screen',
             parameters=[os.path.join(cfg, 'vision.yaml')],
         ),
+        Node(
+            package='soes_state',                      # <— same package
+            executable='i2c_bridge',                   # <— new entry point
+            name='soes_comm_i2c',                      # <— matches comm.yaml root
+            output='screen',
+            parameters=[os.path.join(cfg, 'comm.yaml')],
+        ),
     ])

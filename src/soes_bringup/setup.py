@@ -20,5 +20,4 @@ setup(
     maintainer_email='teresatendeas@gmail.com',
     description='SOES bringup with centralized configs',
     license='MIT',
-    tests_require=['pytest'],
 )

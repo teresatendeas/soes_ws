@@ -14,12 +14,13 @@ setup(
     zip_safe=True,
     maintainer='teresatendeas',
     maintainer_email='teresatendeas@gmail.com',
-    description='State machine for SOES system controller',
+    description='State machine and I2C bridge for SOES system',
     license='MIT',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'state_node = soes_state.node:main',
+            'i2c_bridge = soes_state.soes_comm_i2c:main',
         ],
     },
 )
