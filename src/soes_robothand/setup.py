@@ -14,9 +14,8 @@ setup(
     zip_safe=True,
     maintainer='teresatendeas',
     maintainer_email='teresatendeas@gmail.com',
-    description='Robot hand control node for SOES',
+    description='Robot hand control node for SOES (placeholder with topic wiring)',
     license='MIT',
-    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'robothand_node = soes_robothand.node:main',

@@ -20,7 +20,7 @@ class I2CBridge(Node):
 
         # Parameters (loaded from soes_bringup/config/comm.yaml)
         self.declare_parameter('i2c_bus', 1)     # Jetson bus 1 => header pins SDA=3, SCL=5
-        self.declare_parameter('i2c_addr', 0x08) # ESP32 slave address
+        self.declare_parameter('i2c_addr', 0x28) # ESP32 slave address
         self.declare_parameter('deg_scale', 10)  # joints in degrees*10 (int16)
         self.declare_parameter('duty_scale', 100)# duty [0..1] -> [0..100]
         self.declare_parameter('debug', True)

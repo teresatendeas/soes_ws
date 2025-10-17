@@ -14,9 +14,8 @@ setup(
     zip_safe=True,
     maintainer='teresatendeas',
     maintainer_email='teresatendeas@gmail.com',
-    description='Vision node for SOES system',
+    description='Vision node for SOES (dummy publishers)',
     license='MIT',
-    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'vision_node = soes_vision.node:main',
