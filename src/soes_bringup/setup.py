@@ -5,6 +5,9 @@ import os
 package_name = 'soes_bringup'
 
 setup(
+    entry_points={'console_scripts': [
+            'soes_comm_i2c = soes_state.soes_comm_i2c:main',
+            'one_motor_cmd = soes_state.one_motor_cmd:main',]},
     name=package_name,
     version='0.0.1',
     packages=[package_name],
