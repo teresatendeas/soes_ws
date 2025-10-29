@@ -182,9 +182,10 @@ class RoboHandNode(Node):
 
         out = JointTargets()
         out.position = [float(a) for a in self.q]
-        out.velocity = [0.0, 0.0, 0.0, 0.0]
-        out.use_velocity = False
+        out.velocity = [float(w) for w in qdot]
+        out.use_velocity = True
         self.targets_pub.publish(out)
+
 
     # ================= Main loop =================
     def _tick(self):
