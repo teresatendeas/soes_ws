@@ -9,30 +9,38 @@ from soes_msgs.srv import RollTray
 
 from .utils import PumpController
 
+
 class Phase(enum.Enum):
     INIT_POS    = 0
-    POS1_PUMP   = 1
-    POS2_PUMP   = 2
-    POS3_PUMP   = 3
-    RETURN_INIT = 4
-    CAMERA      = 5
-    ROLL_TRAY   = 6
-    IDLE        = 7
+    STEP0       = 1   # index = order[0]
+    STEP1       = 2   # index = order[1]
+    STEP2       = 3   # index = order[2]
+    CAMERA      = 4
+    ROLL_TRAY   = 5
+    IDLE        = 6
+
 
 class StateNode(Node):
     def __init__(self):
         super().__init__('soes_state')
 
-        # ----- parameters (tune in YAML) -----
-        self.declare_parameter('pump_on_s', 2.0)         # pump ON duration at each position
-        self.declare_parameter('settle_s', 0.5)          # settle time after index change
-        self.declare_parameter('order', [1, 0, 2])       # index order for POS1, POS2, POS3
+        # ---------- Parameters ----------
+        # Timing (state only; robothand handles MOVE/SWIRL internally)
+        self.declare_parameter('settle_before_pump_s', 0.6)  # wait after setting index before pump
+        self.declare_parameter('pump_on_s', 2.0)             # pump ON duration
+        self.declare_parameter('swirl_time_s', 1.0)          # time to let robothand lift (+3 cm)
+        self.declare_parameter('order', [0, 1, 2])           # visit order for centers
+
+        # Roller
         self.declare_parameter('roller_distance_mm', 100.0)
         self.declare_parameter('roller_speed_mm_s', 40.0)
-        self.declare_parameter('camera_timeout_s', 2.0)  # wait time in CAMERA state
 
-        self.pump_on_s  = float(self.get_parameter('pump_on_s').value)
-        self.settle_s   = float(self.get_parameter('settle_s').value)
+        # Vision
+        self.declare_parameter('camera_timeout_s', 2.0)
+
+        self.t_settle   = float(self.get_parameter('settle_before_pump_s').value)
+        self.t_pump     = float(self.get_parameter('pump_on_s').value)
+        self.t_swirl    = float(self.get_parameter('swirl_time_s').value)
         self.order      = list(self.get_parameter('order').value)
         self.roll_dist  = float(self.get_parameter('roller_distance_mm').value)
         self.roll_speed = float(self.get_parameter('roller_speed_mm_s').value)
@@ -42,38 +50,38 @@ class StateNode(Node):
                          reliability=ReliabilityPolicy.RELIABLE,
                          history=HistoryPolicy.KEEP_LAST)
 
-        # ----- pubs/subs/srvs -----
-        self.index_pub = self.create_publisher(Int32, '/state/active_index', 1)  # 0,1,2 or -1 for init
+        # ---------- ROS I/O ----------
+        self.index_pub = self.create_publisher(Int32, '/state/active_index', 1)
         self.pump_pub  = self.create_publisher(PumpCmd, '/pump/cmd', 1)
         self.qual_sub  = self.create_subscription(VisionQuality, '/vision/quality', self.on_quality, qos)
         self.roll_cli  = self.create_client(RollTray, '/tray/roll')
 
-        # pump helper
+        # Pump helper
         self.pump = PumpController(self._pump_on, self._pump_off)
 
-        # runtime vars
+        # ---------- Runtime ----------
         self.phase = Phase.INIT_POS
-        self.phase_time = self.get_clock().now()
+        self.phase_t0 = self.get_clock().now()
         self.quality_flag = False
-        self._pos_step = 0           # 0→POS1, 1→POS2, 2→POS3
-        self._pump_started = False
+        self._step_idx = 0  # 0..2 for STEP0..STEP2
+        self._did_start_pump = False
 
         # 20 Hz tick
         self.timer = self.create_timer(0.05, self.tick)
-        self.get_logger().info('soes_state: sequence ready (INIT_POS).')
+        self.get_logger().info('soes_state: ready (INIT_POS).')
 
-        # enter INIT_POS: set index to -1 (home/init pose)
+        # go to init pose (robothand interprets -1 as home)
         self._publish_index(-1)
 
-    # --------- helpers ----------
+    # ---------- Helpers ----------
     def _enter(self, new_phase: Phase):
         self.phase = new_phase
-        self.phase_time = self.get_clock().now()
-        self._pump_started = False
+        self.phase_t0 = self.get_clock().now()
+        self._did_start_pump = False
         self.get_logger().info(f'[STATE] -> {self.phase.name}')
 
     def _elapsed(self) -> float:
-        return (self.get_clock().now() - self.phase_time).nanoseconds * 1e-9
+        return (self.get_clock().now() - self.phase_t0).nanoseconds * 1e-9
 
     def _publish_index(self, idx: int):
         msg = Int32(); msg.data = int(idx)
@@ -81,6 +89,7 @@ class StateNode(Node):
         self.get_logger().info(f'active_index = {idx}')
 
     def _pump_on(self, duty: float, duration_s: float):
+        # Clamp if you want safety limits here
         msg = PumpCmd(); msg.on = True; msg.duty = float(duty); msg.duration_s = float(duration_s)
         self.pump_pub.publish(msg)
 
@@ -88,47 +97,23 @@ class StateNode(Node):
         msg = PumpCmd(); msg.on = False; msg.duty = 0.0; msg.duration_s = 0.0
         self.pump_pub.publish(msg)
 
-    # --------- callbacks ----------
+    # ---------- Callbacks ----------
     def on_quality(self, msg: VisionQuality):
         self.quality_flag = bool(msg.needs_human)
 
-    # --------- state machine tick ----------
+    # ---------- Main tick ----------
     def tick(self):
         if self.phase == Phase.INIT_POS:
-            # wait settle, then go to POS1
-            self.get_logger().info('System Starting ...')
-            if self._elapsed() >= self.settle_s:
-                self._pos_step = 0
-                self._enter(Phase.POS1_PUMP)
-                self._publish_index(self.order[0])
+            # After init settle, start STEP0 at order[0]
+            if self._elapsed() >= self.t_settle:
+                self._step_idx = 0
+                self._start_step(self._step_idx)
 
-        elif self.phase == Phase.POS1_PUMP:
-            self.get_logger().info('Going to POS1 ...')
-            self._handle_pump_phase(next_phase=Phase.POS2_PUMP, next_index=self.order[1])
-
-        elif self.phase == Phase.POS2_PUMP:
-            self.get_logger().info('Going to POS2 ...')
-            self._handle_pump_phase(next_phase=Phase.POS3_PUMP, next_index=self.order[2])
-
-        elif self.phase == Phase.POS3_PUMP:
-            # last pump, then return to init
-            self.get_logger().info('Going to POS3 ...')
-            if not self._pump_started and self._elapsed() >= self.settle_s:
-                self.pump.start(duty=1.0, duration_s=0.0)
-                self._pump_started = True
-            if self._pump_started and self._elapsed() >= (self.settle_s + self.pump_on_s):
-                self.pump.stop()
-                self._enter(Phase.RETURN_INIT)
-                self._publish_index(-1)
-
-        elif self.phase == Phase.RETURN_INIT:
-            self.get_logger().info('Returning to init ...')
-            if self._elapsed() >= self.settle_s:
-                self._enter(Phase.CAMERA)
+        elif self.phase in (Phase.STEP0, Phase.STEP1, Phase.STEP2):
+            self._run_step()
 
         elif self.phase == Phase.CAMERA:
-            # wait up to camera_timeout for an updated quality message
-            self.get_logger().info('Camera recording ...')
+            # wait up to camera_timeout for an updated quality decision
             if self._elapsed() >= self.cam_to:
                 if self.quality_flag:
                     self.get_logger().warn('quality check requests attention.')
@@ -144,21 +129,51 @@ class StateNode(Node):
             req.distance_mm = self.roll_dist
             req.speed_mm_s  = self.roll_speed
             self.roll_cli.call_async(req)
-            self._enter(Phase.INIT_POS)
+
+            # restart the cycle
             self._publish_index(-1)
+            self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.IDLE:
             pass
 
-    def _handle_pump_phase(self, next_phase: Phase, next_index: int):
-        # generic handler for POS1_PUMP and POS2_PUMP
-        if not self._pump_started and self._elapsed() >= self.settle_s:
+    # ---------- Step logic (index + pump timing) ----------
+    def _start_step(self, step_idx: int):
+        idx = self.order[step_idx]
+        self._publish_index(idx)      # tell robothand which center to MOVE to
+        # robothand will do MOVE → (settle) → SWIRL (+3cm)
+        # we time the pump start/stop relative to when we set the index
+        self._enter(Phase.STEP0 if step_idx == 0 else Phase.STEP1 if step_idx == 1 else Phase.STEP2)
+
+    def _run_step(self):
+        t = self._elapsed()
+
+        # 1) wait for arm to reach the center (time-based for now)
+        if (not self._did_start_pump) and t >= self.t_settle:
+            # start pump (duration handled by PumpController or we stop explicitly below)
             self.pump.start(duty=1.0, duration_s=0.0)
-            self._pump_started = True
-        if self._pump_started and self._elapsed() >= (self.settle_s + self.pump_on_s):
+            self._did_start_pump = True
+            self.get_logger().info('Pump ON')
+
+        # 2) stop pump after t_settle + t_pump
+        if self._did_start_pump and t >= (self.t_settle + self.t_pump):
             self.pump.stop()
-            self._enter(next_phase)
-            self._publish_index(next_index)
+            self.get_logger().info('Pump OFF')
+
+        # 3) allow robothand to finish its +3 cm lift ("SWIRL") window
+        if t >= (self.t_settle + self.t_pump + self.t_swirl):
+            # move to next step or camera
+            if self.phase == Phase.STEP0:
+                self._step_idx = 1
+                self._start_step(self._step_idx)
+            elif self.phase == Phase.STEP1:
+                self._step_idx = 2
+                self._start_step(self._step_idx)
+            else:
+                # finished STEP2 → return to init (-1) and do CAMERA
+                self._publish_index(-1)
+                self._enter(Phase.CAMERA)
+
 
 def main():
     rclpy.init()
