@@ -7,13 +7,13 @@ soes_state:
 
     # Wait time after publishing index before starting pump
     # (to let robothand reach the new center position)
-    settle_before_pump_s: 0.6
+    settle_before_pump_s: 4.0
 
     # Pump ON duration (in seconds)
-    pump_on_s: 2.0
+    pump_on_s: 5.0
 
     # Additional time window for robothand to perform +3 cm lift ("SWIRL")
-    swirl_time_s: 1.0
+    swirl_time_s: 5.0
 
     # Index order for three cupcakes
     # [0, 1, 2] means go to center 0, then 1, then 2
@@ -24,17 +24,17 @@ soes_state:
     # ========================
 
     # Distance to roll tray between batches (mm)
-    roller_distance_mm: 100.0
+    roller_distance_mm: 70.0
 
     # Roller linear speed (mm/s)
-    roller_speed_mm_s: 40.0
+    roller_speed_mm_s: 17.5
 
     # ==========================
     # --- VISION PARAMETERS ----
     # ==========================
 
     # Time to wait for camera quality check before proceeding (s)
-    camera_timeout_s: 2.0
+    camera_timeout_s: 5.0
 
     # ==========================
     # --- OPTIONAL (for future) -
