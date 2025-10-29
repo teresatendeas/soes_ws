@@ -1,14 +1,43 @@
 soes_state:
   ros__parameters:
-    # timing
-    pump_on_s: 2.0          # pump ON duration at each position
-    settle_s: 0.5           # settle time after index change
-    camera_timeout_s: 2.0   # wait time in CAMERA state
 
-    # order the three targets will be processed (indices expected by robothand)
-    # 0 = left, 1 = center, 2 = right (or whatever your motion node uses)
+    # ========================
+    # --- TIMING PARAMETERS ---
+    # ========================
+
+    # Wait time after publishing index before starting pump
+    # (to let robothand reach the new center position)
+    settle_before_pump_s: 0.6
+
+    # Pump ON duration (in seconds)
+    pump_on_s: 2.0
+
+    # Additional time window for robothand to perform +3 cm lift ("SWIRL")
+    swirl_time_s: 1.0
+
+    # Index order for three cupcakes
+    # [0, 1, 2] means go to center 0, then 1, then 2
     order: [0, 1, 2]
 
-    # roller command used in ROLL_TRAY
+    # ========================
+    # --- ROLLER PARAMETERS ---
+    # ========================
+
+    # Distance to roll tray between batches (mm)
     roller_distance_mm: 100.0
+
+    # Roller linear speed (mm/s)
     roller_speed_mm_s: 40.0
+
+    # ==========================
+    # --- VISION PARAMETERS ----
+    # ==========================
+
+    # Time to wait for camera quality check before proceeding (s)
+    camera_timeout_s: 2.0
+
+    # ==========================
+    # --- OPTIONAL (for future) -
+    # ==========================
+    # pump_duty: 1.0      # If you later expose duty cycle control
+    # at_target_topic: "/arm/at_target"   # If you add arm feedback
