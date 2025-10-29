@@ -96,19 +96,23 @@ class StateNode(Node):
     def tick(self):
         if self.phase == Phase.INIT_POS:
             # wait settle, then go to POS1
+            self.get_logger().info('System Starting ...')
             if self._elapsed() >= self.settle_s:
                 self._pos_step = 0
                 self._enter(Phase.POS1_PUMP)
                 self._publish_index(self.order[0])
 
         elif self.phase == Phase.POS1_PUMP:
+            self.get_logger().info('Going to POS1 ...')
             self._handle_pump_phase(next_phase=Phase.POS2_PUMP, next_index=self.order[1])
 
         elif self.phase == Phase.POS2_PUMP:
+            self.get_logger().info('Going to POS2 ...')
             self._handle_pump_phase(next_phase=Phase.POS3_PUMP, next_index=self.order[2])
 
         elif self.phase == Phase.POS3_PUMP:
             # last pump, then return to init
+            self.get_logger().info('Going to POS3 ...')
             if not self._pump_started and self._elapsed() >= self.settle_s:
                 self.pump.start(duty=1.0, duration_s=0.0)
                 self._pump_started = True
@@ -118,11 +122,13 @@ class StateNode(Node):
                 self._publish_index(-1)
 
         elif self.phase == Phase.RETURN_INIT:
+            self.get_logger().info('Returning to init ...')
             if self._elapsed() >= self.settle_s:
                 self._enter(Phase.CAMERA)
 
         elif self.phase == Phase.CAMERA:
             # wait up to camera_timeout for an updated quality message
+            self.get_logger().info('Camera recording ...')
             if self._elapsed() >= self.cam_to:
                 if self.quality_flag:
                     self.get_logger().warn('quality check requests attention.')
@@ -132,7 +138,7 @@ class StateNode(Node):
 
         elif self.phase == Phase.ROLL_TRAY:
             if not self.roll_cli.service_is_ready():
-                self.get_logger().info('waiting for /tray/roll ...')
+                self.get_logger().info('Waiting for /tray/roll ...')
                 return
             req = RollTray.Request()
             req.distance_mm = self.roll_dist
