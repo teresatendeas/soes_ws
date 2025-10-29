@@ -7,7 +7,7 @@ soes_state:
 
     # order the three targets will be processed (indices expected by robothand)
     # 0 = left, 1 = center, 2 = right (or whatever your motion node uses)
-    order: [1, 0, 2]
+    order: [0, 1, 2]
 
     # roller command used in ROLL_TRAY
     roller_distance_mm: 100.0
