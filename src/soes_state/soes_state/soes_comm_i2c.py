@@ -4,76 +4,69 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
-from smbus2 import SMBus
+from smbus2 import SMBus, i2c_msg
 from soes_msgs.msg import PumpCmd, JointTargets
 
 class I2CBridge(Node):
-    """
-    Bridges ROS 2 topics to an ESP device via I²C (Jetson Nano SDA/SCL).
-    Subscriptions:
-      - /pump/cmd         (soes_msgs/PumpCmd)
-      - /arm/joint_targets(soes_msgs/JointTargets)
-    Sends compact binary frames to ESP32 I²C slave.
-    """
     def __init__(self):
         super().__init__('soes_comm_i2c')
 
-        # Parameters (loaded from soes_bringup/config/comm.yaml)
-        self.declare_parameter('i2c_bus', 1)     # Jetson bus 1 => header pins SDA=3, SCL=5
-        self.declare_parameter('i2c_addr', 0x28) # ESP32 slave address
-        self.declare_parameter('deg_scale', 10)  # joints in degrees*10 (int16)
-        self.declare_parameter('duty_scale', 100)# duty [0..1] -> [0..100]
+        # Parameters aligned with ESP
+        self.declare_parameter('i2c_bus', 1)
+        self.declare_parameter('i2c_addr', 0x08)
+        self.declare_parameter('pos_scale', 1000)   # matches ESP POS_SCALE
+        self.declare_parameter('vel_scale', 1000)   # matches ESP VEL_SCALE
         self.declare_parameter('debug', True)
 
         self.bus_id = int(self.get_parameter('i2c_bus').value)
         self.addr   = int(self.get_parameter('i2c_addr').value)
-        self.deg_s  = int(self.get_parameter('deg_scale').value)
-        self.duty_s = int(self.get_parameter('duty_scale').value)
+        self.pos_s  = int(self.get_parameter('pos_scale').value)
+        self.vel_s  = int(self.get_parameter('vel_scale').value)
         self.debug  = bool(self.get_parameter('debug').value)
 
-        try:
-            self.bus = SMBus(self.bus_id)
-        except Exception as e:
-            self.get_logger().error(f'Cannot open I2C bus {self.bus_id}: {e}')
-            raise
+        self.bus = SMBus(self.bus_id)
 
-        qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST)
+        qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
+                         history=HistoryPolicy.KEEP_LAST)
         self.create_subscription(PumpCmd, '/pump/cmd', self.on_pump, qos)
         self.create_subscription(JointTargets, '/arm/joint_targets', self.on_joint, qos)
 
         self.get_logger().info(f'I2C bridge up (bus={self.bus_id}, addr=0x{self.addr:02X}).')
 
-    # Frames (little-endian, keep <=32 bytes):
-    #  0x01 Pump:   [0x01, on(u8), duty(u8), rsv(u8), duration_ms(u16)]
-    #  0x02 Joints: [0x02, q0(int16), q1(int16), q2(int16), q3(int16)]  # degrees*scale as int16
-
     def on_pump(self, msg: PumpCmd):
         on_u8 = 1 if msg.on else 0
-        duty_u8 = int(max(0.0, min(1.0, msg.duty)) * self.duty_s)
+        duty_u8 = int(max(0.0, min(1.0, msg.duty)) * 100)
         duration_ms = int(max(0.0, msg.duration_s) * 1000.0)
         frame = struct.pack('<BBBBH', 0x01, on_u8, duty_u8, 0x00, duration_ms)
-        self._i2c_send(0x01, list(frame))
+        self._i2c_send_raw(frame)
         if self.debug:
             self.get_logger().info(f'I2C PUMP -> on={on_u8}, duty%={duty_u8}, dur_ms={duration_ms}')
 
     def on_joint(self, msg: JointTargets):
-        q_deg_scaled = []
-        for i in range(4):
-            rad = float(msg.position[i]) if i < len(msg.position) else 0.0
-            deg_scaled = int(math.degrees(rad) * self.deg_s)
-            deg_scaled = max(-32768, min(32767, deg_scaled))
-            q_deg_scaled.append(deg_scaled)
-        frame = struct.pack('<Bhhhh', 0x02, q_deg_scaled[0], q_deg_scaled[1], q_deg_scaled[2], q_deg_scaled[3])
-        self._i2c_send(0x02, list(frame))
-        if self.debug:
-            self.get_logger().info(f'I2C JOINTS -> {q_deg_scaled}')
+        pos = [float(msg.position[i]) if i < len(msg.position) else 0.0 for i in range(4)]
+        vel = [float(msg.velocity[i]) if hasattr(msg, 'velocity') and i < len(msg.velocity) else 0.0 for i in range(4)]
+        use_velocity = 1 if any(abs(v) > 1e-6 for v in vel) else 0
 
-    def _i2c_send(self, command, data_bytes):
+        def s16(x): 
+            return max(-32768, min(32767, int(x)))
+
+        pos_s16 = [s16(p * self.pos_s) for p in pos]      # radians * 1000
+        vel_s16 = [s16(v * self.vel_s) for v in vel]      # rad/s * 1000
+
+        frame = struct.pack('<BBhhhhhhhh',
+                            0x03, use_velocity,
+                            pos_s16[0], pos_s16[1], pos_s16[2], pos_s16[3],
+                            vel_s16[0], vel_s16[1], vel_s16[2], vel_s16[3])
+        self._i2c_send_raw(frame)
+        if self.debug:
+            self.get_logger().info(f'I2C 0x03 -> use_vel={use_velocity}, pos_s16={pos_s16}, vel_s16={vel_s16}')
+
+    def _i2c_send_raw(self, frame: bytes):
         try:
-            payload = data_bytes[1:] if len(data_bytes) > 1 else []
-            self.bus.write_i2c_block_data(self.addr, command, payload)
+            msg = i2c_msg.write(self.addr, frame)
+            self.bus.i2c_rdwr(msg)
         except Exception as e:
-            self.get_logger().warn(f'I2C send failed (cmd=0x{command:02X}): {e}')
+            self.get_logger().warn(f'I2C send failed: {e}')
 
 def main():
     rclpy.init()
