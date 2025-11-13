@@ -35,11 +35,9 @@ class RoboHandNode(Node):
         # IK tuning
         self.declare_parameter('kp_cart', 3.0)
         self.declare_parameter('damping_lambda', 0.1)
-        self.declare_parameter('joint_limits', {
-            'qdot': [1.5, 1.5, 1.5, 1.5],
-            'qmin': [-math.pi, -math.pi/2, -math.pi/2, -math.pi/2],
-            'qmax': [ math.pi,  math.pi/2,  math.pi/2,  math.pi/2],
-        })
+        self.declare_parameter('qdot_limit_rad_s', [1.5, 1.5, 1.5, 1.5])
+        self.declare_parameter('q_min_rad', [-math.pi, -math.pi/2, -math.pi/2, -math.pi/2])
+        self.declare_parameter('q_max_rad', [ math.pi,  math.pi/2,  math.pi/2,  math.pi/2])
 
         # Spiral parameters
         self.declare_parameter('R0', 0.025)
@@ -59,12 +57,10 @@ class RoboHandNode(Node):
 
         self.kp = float(self.get_parameter('kp_cart').value)
         self.lmbda = float(self.get_parameter('damping_lambda').value)
-
-        limits = self.get_parameter('joint_limits').value
-        self.qdot_lim = np.array(limits['qdot'], dtype=float)
-        self.q_min = np.array(limits['qmin'], dtype=float)
-        self.q_max = np.array(limits['qmax'], dtype=float)
-
+        self.qdot_lim = np.array(self.get_parameter('qdot_limit_rad_s').value, dtype=float)
+        self.q_min = np.array(self.get_parameter('q_min_rad').value, dtype=float)
+        self.q_max = np.array(self.get_parameter('q_max_rad').value, dtype=float)
+        
         self.R0 = float(self.get_parameter('R0').value)
         self.turns = int(self.get_parameter('turns').value)
         self.alpha = float(self.get_parameter('alpha').value)
