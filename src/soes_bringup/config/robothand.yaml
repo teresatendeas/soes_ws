@@ -55,7 +55,7 @@ soes_robothand:
     turns: 3
 
     # Angular velocity [rad/s]
-    omega: 0.5
+    omega: 1.5708
 
     # =======================
     # --- DEBUG / LOGGING ---
