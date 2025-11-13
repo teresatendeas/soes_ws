@@ -5,47 +5,61 @@ soes_robothand:
     # --- GENERAL TIMING ---
     # ======================
 
-    # Control rate [Hz] — 50 Hz is a good starting point for Jetson Nano
-    rate_hz: 50.0
+    # Control loop update rate [Hz]
+    rate_hz: 50.0                # 50 Hz is a good default
 
     # Position tolerance [m] to consider "at target"
-    pos_tol_m: 0.003          # 3 mm
+    pos_tol_m: 0.003             # 3 mm
 
-    # Hold time once within tolerance before switching phase [s]
+    # Time to remain within tolerance before switching phases [s]
     settle_s: 0.20
-
-    # Lift height for the SWIRL phase [m]
-    lift_height_m: 0.03       # +3 cm
 
     # =======================
     # --- LINK GEOMETRY -----
     # =======================
 
-    # Length of each planar link in meters
-    # L1 = shoulder→elbow, L2 = elbow→wrist, L3 = wrist→end-effector
-    link_lengths_m: [0.12, 0.12, 0.10]
+    # Robot link lengths [m] (base to tip)
+    # [L1, L2, L3, L4]
+    link_lengths_m: [0.00, 0.14, 0.12, 0.04]
 
     # =======================
     # --- IK GAINS & LIMITS -
     # =======================
 
     # Task-space proportional gain [1/s]
-    kp_cart: 2.0
+    kp_cart: 3.0
 
-    # Damping term λ for Damped Least Squares pseudo-inverse
-    damping_lambda: 0.01
+    # Damping factor λ for Damped Least Squares IK
+    damping_lambda: 0.1
 
-    # Max joint speed limits [rad/s] for [yaw, pitch1, pitch2, pitch3]
-    qdot_limit_rad_s: [1.5, 1.5, 1.5, 1.5]
+    # Joint limits and velocity bounds
+    joint_limits:
+      qdot: [1.5, 1.5, 1.5, 1.5]             # [rad/s] max speed
+      qmin: [-3.1416, -1.5708, -1.5708, -1.5708]   # [rad] lower joint limits
+      qmax: [ 3.1416,  1.5708,  1.5708,  1.5708]   # [rad] upper joint limits
 
-    # Joint limits [rad]
-    q_min_rad: [-3.1416, -1.5708, -1.5708, -1.5708]
-    q_max_rad: [ 3.1416,  1.5708,  1.5708,  1.5708]
+    # =======================
+    # --- SPIRAL PARAMETERS -
+    # =======================
+
+    # Base spiral radius [m]
+    R0: 0.025
+
+    # Spiral taper (negative = inverse cone)
+    alpha: -0.03
+
+    # Spiral total height [m]
+    height: 0.04
+
+    # Number of turns in spiral
+    turns: 3
+
+    # Angular velocity [rad/s]
+    omega: 0.5
 
     # =======================
     # --- DEBUG / LOGGING ---
     # =======================
 
-    # You can set this true to print each iteration’s XYZ error and qdot
-    # (disabled by default for performance)
+    # Print diagnostic info per tick (optional)
     debug_print: false
