@@ -213,6 +213,9 @@ class StateNode(Node):
             self._publish_index(-1)     # back to HOME
             self._enter(Phase.INIT_POS)
 
+        elif self.phase == Phase.IDLE:
+            return
+
     # ---------- Step logic ----------
     def _start_step(self, step_idx: int):
         idx = self.order[step_idx]
