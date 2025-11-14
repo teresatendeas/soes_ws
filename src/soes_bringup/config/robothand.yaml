@@ -1,65 +1,25 @@
 soes_robothand:
   ros__parameters:
+    rate_hz: 20.0
+    pos_tol_m: 0.003
+    settle_s: 0.20
 
-    # ======================
-    # --- GENERAL TIMING ---
-    # ======================
-
-    # Control loop update rate [Hz]
-    rate_hz: 20.0                # 50 Hz is a good default
-
-    # Position tolerance [m] to consider "at target"
-    pos_tol_m: 0.01             # 1 cm
-
-    # Time to remain within tolerance before switching phases [s]
-    settle_s: 3.00
-
-    # =======================
-    # --- LINK GEOMETRY -----
-    # =======================
-
-    # Robot link lengths [m] (base to tip)
-    # [L1, L2, L3, L4]
     link_lengths_m: [0.00, 0.14, 0.12, 0.04]
 
-    # =======================
-    # --- IK GAINS & LIMITS -
-    # =======================
+    kp_cart: 3.0
+    damping_lambda: 0.1
+    qdot_limit_rad_s: [1.5, 1.5, 1.5, 1.5]
+    q_min_rad: [-3.1416, -1.5708, -1.5708, -1.5708]
+    q_max_rad: [ 3.1416,  1.5708,  1.5708,  1.5708]
 
-    # Task-space proportional gain [1/s]
-    kp_cart: 1.0
+    # home pose you actually want (example only)
+    q_home_rad: [0.0, 0.10, -0.30, 0.20]
+    kp_joint: 3.0
+    home_tol_rad: 0.02
 
-    # Damping factor λ for Damped Least Squares IK
-    damping_lambda: 0.4
-
-    # Joint limits and velocity bounds
-    joint_limits:
-      qdot: [1.5, 1.5, 1.5, 1.5]             # [rad/s] max speed
-      qmin: [-3.1416, -1.5708, -1.5708, -1.5708]   # [rad] lower joint limits
-      qmax: [ 3.1416,  1.5708,  1.5708,  1.5708]   # [rad] upper joint limits
-
-    # =======================
-    # --- SPIRAL PARAMETERS -
-    # =======================
-
-    # Base spiral radius [m]
+    # spiral
     R0: 0.025
-
-    # Spiral taper (negative = inverse cone)
-    alpha: -0.03
-
-    # Spiral total height [m]
-    height: 0.04
-
-    # Number of turns in spiral
     turns: 3
-
-    # Angular velocity [rad/s]
-    omega: 1.5708
-
-    # =======================
-    # --- DEBUG / LOGGING ---
-    # =======================
-
-    # Print diagnostic info per tick (optional)
-    debug_print: false
+    alpha: -0.03
+    height: 0.04
+    omega: 0.5
