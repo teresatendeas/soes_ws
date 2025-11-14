@@ -129,7 +129,7 @@ class StateNode(Node):
             return
 
         # ======== NORMAL SEQUENCE ========
-        if self.phase == Phase.TEST_MOTOR:
+        if self.phase == Phase.INIT_POS:
             # WAIT for robothand to confirm it is at HOME (via /arm/at_target)
             if self.arm_at and self.arm_at_since is not None:
                 if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
