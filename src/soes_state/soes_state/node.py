@@ -135,7 +135,7 @@ class StateNode(Node):
                 if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
                     self._step_idx = 0
                     self._start_step(self._step_idx)
-        elif self.phase in (Phase.STEP0, Phase.STEP1, Phase.STEP2):
+        elif self.phase == Phase.STEP0:
             self._run_step()
         elif self.phase == Phase.CAMERA:
             if self._elapsed() >= self.cam_to:
@@ -144,17 +144,21 @@ class StateNode(Node):
                 else:
                     self.get_logger().info('quality check OK.')
                 self._enter(Phase.ROLL_TRAY)
+                
         elif self.phase == Phase.ROLL_TRAY:
             if not self.roll_cli.service_is_ready():
                 self.get_logger().info('Waiting for /tray/roll ...')
                 return
+                
             req = RollTray.Request()
             req.distance_mm = self.roll_dist
             req.speed_mm_s  = self.roll_speed
             self.roll_cli.call_async(req)
+            
             # restart the cycle
             self._publish_index(-1)     # back to HOME
             self._enter(Phase.INIT_POS)
+            
         elif self.phase == Phase.IDLE:
             pass
 
@@ -177,10 +181,6 @@ class StateNode(Node):
 
         if t >= (self.t_settle + self.t_pump + self.t_swirl):
             if self.phase == Phase.STEP0:
-                self._step_idx = 1; self._start_step(self._step_idx)
-            elif self.phase == Phase.STEP1:
-                self._step_idx = 2; self._start_step(self._step_idx)
-            else:
                 self._publish_index(-1)  # back to HOME
                 self._enter(Phase.CAMERA)
 
