@@ -228,12 +228,3 @@ class StateNode(Node):
 
         self.pump_pub.publish(pump_msg)
         self.arm_pub.publish(jt)
-
-
-
-def main():
-    rclpy.init()
-    node = StateNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
