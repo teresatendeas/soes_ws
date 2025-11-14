@@ -135,7 +135,7 @@ class StateNode(Node):
                 if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
                     self._step_idx = 0
                     self._start_step(self._step_idx)
-        elif self.phase == Phase.STEP0:
+        elif self.phase in (Phase.STEP0, Phase.STEP1, Phase.STEP2):
             self._run_step()
         elif self.phase == Phase.CAMERA:
             if self._elapsed() >= self.cam_to:
@@ -181,6 +181,10 @@ class StateNode(Node):
 
         if t >= (self.t_settle + self.t_pump + self.t_swirl):
             if self.phase == Phase.STEP0:
+                self._step_idx = 1; self._start_step(self._step_idx)
+            elif self.phase == Phase.STEP1:
+                self._step_idx = 2; self._start_step(self._step_idx)
+            else:
                 self._publish_index(-1)  # back to HOME
                 self._enter(Phase.CAMERA)
 
