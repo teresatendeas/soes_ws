@@ -36,7 +36,6 @@ class RoboHandNode(Node):
         self.declare_parameter('settle_s', 0.20)      # dwell inside tol before declaring "at target"
 
         # -------- Geometry (L1..L4) --------
-        # matches your previous analytic FK/J
         self.declare_parameter('link_lengths_m', [0.00, 0.14, 0.12, 0.04])  # [L1,L2,L3,L4]
 
         # -------- IK tuning --------
@@ -92,6 +91,7 @@ class RoboHandNode(Node):
         self.center_sub  = self.create_subscription(CupcakeCenters, '/vision/centers', self._on_centers, qos)
         self.targets_pub = self.create_publisher(JointTargets, '/arm/joint_targets', 10)
         self.at_pub      = self.create_publisher(Bool, '/arm/at_target', 1)
+        self.swirl_pub   = self.create_publisher(Bool, '/arm/swirl_active', 1)   # NEW
 
         # -------- Runtime --------
         self.q: np.ndarray = np.zeros(4, dtype=float)
@@ -180,6 +180,10 @@ class RoboHandNode(Node):
     def _publish_at(self, is_at: bool):
         self.at_pub.publish(Bool(data=bool(is_at)))
 
+    def _publish_swirl(self, active: bool):          # NEW
+        """Tell StateNode whether we are in SWIRL phase or not."""  # NEW
+        self.swirl_pub.publish(Bool(data=bool(active)))            # NEW
+
     def _home_step(self) -> bool:
         """Joint-space home control."""
         err = self.q_home - self.q
@@ -233,11 +237,13 @@ class RoboHandNode(Node):
         # HOME
         if self.phase == Phase.HOME:
             self._home_step()
+            self._publish_swirl(False)   # NEW
             return
 
         # WAIT
         if self.phase == Phase.WAIT:
             self._publish_at(False)
+            self._publish_swirl(False)   # NEW
             return
 
         # MOVE
@@ -245,12 +251,14 @@ class RoboHandNode(Node):
             at = self._ik_step(self.des_xyz)
             if at:
                 self._start_swirl()
+            self._publish_swirl(False)   # NEW
             return
 
         # SWIRL
         if self.phase == Phase.SWIRL and self.spiral_center is not None:
             if self.theta_max <= 0.0:
                 self._enter(Phase.WAIT, None)
+                self._publish_swirl(False)   # NEW
                 return
 
             # Spiral pose
@@ -272,10 +280,14 @@ class RoboHandNode(Node):
 
             if self.spiral_theta >= self.theta_max:
                 self._enter(Phase.WAIT, None)
+                self._publish_swirl(False)   # NEW: SWIRL ended
+            else:
+                self._publish_swirl(True)    # NEW: still swirling
             return
 
         # default
         self._publish_at(False)
+        self._publish_swirl(False)           # NEW
 
 
 def main():
