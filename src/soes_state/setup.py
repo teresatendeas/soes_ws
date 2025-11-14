@@ -7,20 +7,21 @@ setup(
     version='0.0.1',
     packages=[package_name],
     data_files=[
-        ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
+        ('share/ament_index/resource_index/packages',
+            ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='teresatendeas',
     maintainer_email='teresatendeas@gmail.com',
-    description='State machine and I2C bridge for SOES system',
-    license='MIT',
+    description='State machine and tools for the SOES robot',
+    license='TODO',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'state_node = soes_state.node:main',
-            'i2c_bridge = soes_state.soes_comm_i2c:main',
+            'graph      = soes_state.graph:main',
         ],
     },
 )
