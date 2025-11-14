@@ -1,7 +1,7 @@
 soes_robothand:
   ros__parameters:
     rate_hz: 20.0
-    pos_tol_m: 0.003
+    pos_tol_m: 0.01
     settle_s: 0.20
 
     link_lengths_m: [0.00, 0.14, 0.12, 0.04]
@@ -9,8 +9,8 @@ soes_robothand:
     kp_cart: 3.0
     damping_lambda: 0.1
     qdot_limit_rad_s: [1.5, 1.5, 1.5, 1.5]
-    q_min_rad: [-3.1416, -1.5708, -1.5708, -1.5708]
-    q_max_rad: [ 3.1416,  1.5708,  1.5708,  1.5708]
+    q_min_rad: [-314.16, -157.08, -157.08, -1.5708]
+    q_max_rad: [ 314.16,  157.08,  157.08,  1.5708]
 
     # home pose you actually want (example only)
     q_home_rad: [0.0, 0.10, -0.30, 0.20]
