@@ -29,6 +29,8 @@ class StateNode(Node):
 
         # ---------- Parameters ----------
         self.declare_parameter('settle_before_pump_s', 0.6)
+        self.declare_parameter('pump_on_s', 2.0)
+        self.declare_parameter('swirl_time_s', 1.0)
         self.declare_parameter('order', [0, 1, 2])
 
         self.declare_parameter('roller_distance_mm', 100.0)
