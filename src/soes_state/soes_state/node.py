@@ -72,7 +72,7 @@ class StateNode(Node):
         self.pump = PumpController(self._pump_on, self._pump_off)
 
         # ---------- Runtime ----------
-        self.phase = Phase.CAMERA      # set TEST_MOTOR to try the test sequence
+        self.phase = Phase.CAMERA      # set TEST_MOTOR or INIT_POS
         self.phase_t0 = self.get_clock().now()
         self.quality_flag = False
         self._step_idx = 0
@@ -123,7 +123,7 @@ class StateNode(Node):
 
     # ---------- Main tick ----------
     def tick(self):
-        # ======== TEST_MOTOR (unchanged; skip for brevity) ========
+        # ======== TEST_MOTOR ========
         if self.phase == Phase.TEST_MOTOR:
             self._test_motor_tick()
             return
