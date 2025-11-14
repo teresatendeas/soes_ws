@@ -29,8 +29,6 @@ class StateNode(Node):
 
         # ---------- Parameters ----------
         self.declare_parameter('settle_before_pump_s', 0.6)
-        self.declare_parameter('pump_on_s', 2.0)
-        self.declare_parameter('swirl_time_s', 1.0)
         self.declare_parameter('order', [0, 1, 2])
 
         self.declare_parameter('roller_distance_mm', 100.0)
@@ -70,7 +68,12 @@ class StateNode(Node):
 
         # NEW: subscribe to /esp_switch_on to gate the whole state machine
         self.switch_on = False  # default OFF -> goes to IDLE until switch turns ON
-        self.create_subscription(Bool, '/esp_switch_on', self._on_switch, 10)  # NEW
+        self.create_subscription(Bool, '/esp_switch_on', self._on_switch, 10)
+
+        # NEW: subscribe to /arm/swirl_active to control pump
+        self.swirl_active = False                                  # NEW
+        self.create_subscription(Bool, '/arm/swirl_active',        # NEW
+                                 self._on_swirl, 10)              # NEW
 
         # Pump helper
         self.pump = PumpController(self._pump_on, self._pump_off)
@@ -128,6 +131,10 @@ class StateNode(Node):
           - True  -> if currently IDLE, restart from INIT_POS
         """
         self.switch_on = bool(msg.data)
+
+    def _on_swirl(self, msg: Bool):      # NEW
+        """Track when RoboHand is in SWIRL phase."""  # NEW
+        self.swirl_active = bool(msg.data)           # NEW
 
     # ---------- Callbacks ----------
     def on_quality(self, msg: VisionQuality):
@@ -211,19 +218,24 @@ class StateNode(Node):
         self._enter(Phase.STEP0 if step_idx == 0 else Phase.STEP1 if step_idx == 1 else Phase.STEP2)
 
     def _run_step(self):
-        t = self._elapsed()
-        if (not self._did_start_pump) and t >= self.t_settle:
-            self.pump.start(duty=1.0, duration_s=0.0)
-            self._did_start_pump = True
-            self.get_logger().info('Pump ON')
-
-        if self._did_start_pump and t >= (self.t_settle + self.t_pump):
-            self.pump.stop()
-            self.get_logger().info('Pump OFF')
-
-        if t >= (self.t_settle + self.t_pump + self.t_swirl):
-            return True
-        return False
+        """
+        CHANGED: Pump now follows RoboHand SWIRL phase:
+          - while /arm/swirl_active == True  -> pump ON
+          - when it returns to False after having been True -> pump OFF and step complete
+        """
+        if self.swirl_active:
+            if not self._did_start_pump:
+                self.pump.start(duty=1.0, duration_s=0.0)
+                self._did_start_pump = True
+                self.get_logger().info('Pump ON (SWIRL)')
+            return False
+        else:
+            if self._did_start_pump:
+                self.pump.stop()
+                self._did_start_pump = False
+                self.get_logger().info('Pump OFF (SWIRL complete)')
+                return True
+            return False
 
     # ---------- TEST_MOTOR helper ----------
     def _test_motor_tick(self):
