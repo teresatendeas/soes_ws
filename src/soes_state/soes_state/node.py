@@ -271,18 +271,11 @@ class StateNode(Node):
             jt.position[1] = direction * amp_rad
             jt.position[2] = direction * amp_rad
             jt.position[3] = math.radians(servo_high_deg if direction > 0 else servo_low_deg)
-        else:
+       else:
             jt.use_velocity = True
             jt.position[3] = math.radians(servo_neutral_deg)
-            t_pump = t - 5 * period
             pump_speed = 10.0
-            rev = 5.0
-            swirl_time = (rev * 2.0 * math.pi) / pump_speed
-            if   t_pump < swirl_time:                jt.velocity[3] =  pump_speed
-            elif t_pump < swirl_time + 3.0:         jt.velocity[3] =  0.0
-            elif t_pump < 2 * swirl_time + 3.0:     jt.velocity[3] = -pump_speed
-            elif t_pump < 2 * swirl_time + 6.0:     jt.velocity[3] =  0.0
-            else:                                    jt.velocity[3] =  0.0
+            jt.velocity[3] = pump_speed
 
         self.pump_pub.publish(pump_msg)
         self.arm_pub.publish(jt)
