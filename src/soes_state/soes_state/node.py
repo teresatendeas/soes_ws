@@ -68,6 +68,10 @@ class StateNode(Node):
         self.arm_at_since = None
         self.create_subscription(Bool, '/arm/at_target', self._on_at_target, 10)
 
+        # NEW: subscribe to /esp_switch_on to gate the whole state machine
+        self.switch_on = False  # default OFF -> goes to IDLE until switch turns ON
+        self.create_subscription(Bool, '/esp_switch_on', self._on_switch, 10)  # NEW
+
         # Pump helper
         self.pump = PumpController(self._pump_on, self._pump_off)
 
@@ -117,6 +121,14 @@ class StateNode(Node):
             self.arm_at = False
             self.arm_at_since = None
 
+    def _on_switch(self, msg: Bool):
+        """
+        /esp_switch_on:
+          - False -> force state machine into IDLE
+          - True  -> if currently IDLE, restart from INIT_POS
+        """
+        self.switch_on = bool(msg.data)
+
     # ---------- Callbacks ----------
     def on_quality(self, msg: VisionQuality):
         self.quality_flag = bool(msg.needs_human)
@@ -127,6 +139,23 @@ class StateNode(Node):
         if self.phase == Phase.TEST_MOTOR:
             self._test_motor_tick()
             return
+
+        # ======== SWITCH GATING (ESP) ========
+        if not self.switch_on:
+            # Switch OFF → go/stay in IDLE, ensure pump OFF and arm commanded HOME
+            if self.phase != Phase.IDLE:
+                self.get_logger().warn('ESP switch OFF → entering IDLE.')
+                self.pump.stop()
+                self._publish_index(-1)   # go to HOME
+                self._enter(Phase.IDLE)
+            return
+        else:
+            # Switch turned ON while in IDLE → restart from INIT_POS
+            if self.phase == Phase.IDLE:
+                self.get_logger().info('ESP switch ON → restarting from INIT_POS.')
+                self._publish_index(-1)   # command HOME again
+                self._enter(Phase.INIT_POS)
+                # fall through into normal INIT_POS handling below
 
         # ======== NORMAL SEQUENCE ========
         if self.phase == Phase.INIT_POS:
@@ -174,9 +203,6 @@ class StateNode(Node):
             # restart the cycle
             self._publish_index(-1)     # back to HOME
             self._enter(Phase.INIT_POS)
-            
-        elif self.phase == Phase.IDLE:
-            pass
 
     # ---------- Step logic ----------
     def _start_step(self, step_idx: int):
@@ -199,7 +225,7 @@ class StateNode(Node):
             return True
         return False
 
-    # ---------- TEST_MOTOR helper (same as your version) ----------
+    # ---------- TEST_MOTOR helper ----------
     def _test_motor_tick(self):
         t = self._elapsed()
         period = self.test_period_s
