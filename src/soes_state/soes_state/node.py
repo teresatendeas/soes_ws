@@ -74,8 +74,8 @@ class StateNode(Node):
         self.pump = PumpController(self._pump_on, self._pump_off)
 
         # ---------- Runtime ----------
-        self.phase = Phase.TEST_MOTOR # <-------------------------------------------------------- CHANGE THIS
-        #self.phase = Phase.INIT_POS
+        #self.phase = Phase.TEST_MOTOR # <-------------------------------------------------------- CHANGE THIS
+        self.phase = Phase.INIT_POS
         self.phase_t0 = self.get_clock().now()
         self.quality_flag = False
         self._step_idx = 0  # 0..2 for STEP0..STEP2
