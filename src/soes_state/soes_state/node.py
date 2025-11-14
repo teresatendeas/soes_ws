@@ -271,7 +271,7 @@ class StateNode(Node):
             jt.position[1] = direction * amp_rad
             jt.position[2] = direction * amp_rad
             jt.position[3] = math.radians(servo_high_deg if direction > 0 else servo_low_deg)
-       else:
+        else:
             jt.use_velocity = True
             jt.position[3] = math.radians(servo_neutral_deg)
             pump_speed = 10.0
