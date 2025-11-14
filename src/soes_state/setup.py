@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'state_node = soes_state.node:main',
+            'i2c_bridge = soes_state.soes_comm_i2c:main',
             'graph      = soes_state.graph:main',
         ],
     },
