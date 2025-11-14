@@ -133,10 +133,26 @@ class StateNode(Node):
             # WAIT for robothand to confirm it is at HOME (via /arm/at_target)
             if self.arm_at and self.arm_at_since is not None:
                 if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
+                    self.get_logger().info("INIT_POS complete → STEP0")
                     self._step_idx = 0
-                    self._start_step(self._step_idx)
-        elif self.phase in (Phase.STEP0, Phase.STEP1, Phase.STEP2):
-            self._run_step()
+                    self._enter(Phase.STEP0)
+                    self._start_step(0)
+        elif self.phase == Phase.STEP0:
+            if self._run_step():
+                self.get_logger().info("STEP0 complete → STEP1")
+                self._step_idx = 1
+                self._enter(Phase.STEP1)
+                self._start_step(1)
+        elif self.phase == Phase.STEP1:
+            if self._run_step():
+                self.get_logger().info("STEP1 complete → STEP2")
+                self._step_idx = 2
+                self._enter(Phase.STEP2)
+                self._start_step(2)
+        elif self.phase == Phase.STEP2:
+            if self._run_step():
+                self.get_logger().info("STEP2 complete → CAMERA")
+                self._enter(Phase.CAMERA)
         elif self.phase == Phase.CAMERA:
             if self._elapsed() >= self.cam_to:
                 if self.quality_flag:
