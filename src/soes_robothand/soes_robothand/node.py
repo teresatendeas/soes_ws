@@ -194,6 +194,9 @@ class RoboHandNode(Node):
         self._publish_targets(self.q, np.zeros(4), use_velocity=False)
         at = float(np.linalg.norm(err)) <= self.home_tol
         self._publish_at(at)
+        if at:
+            self.get_logger().info("[HOME] Reached")
+        
         return at
 
     def _ik_step(self, des_xyz: np.ndarray, xdot_ff: Optional[np.ndarray] = None) -> bool:
@@ -221,6 +224,9 @@ class RoboHandNode(Node):
             self.last_within_tol is not None and
             (self.get_clock().now() - self.last_within_tol) >= Duration(seconds=self.settle_s)
         )
+        if at:
+            self.get_logger().info("[IK] Target settled, IK complete")
+
         self._publish_at(at)
         return at
 
@@ -279,9 +285,11 @@ class RoboHandNode(Node):
             self.spiral_theta += self.omega * self.dt
 
             if self.spiral_theta >= self.theta_max:
+                self.get_logger().info("[SWIRL] Completed full spiral")
                 self._enter(Phase.WAIT, None)
                 self._publish_swirl(False)   # NEW: SWIRL ended
             else:
+                self.get_logger().debug("[SWIRL] Active")
                 self._publish_swirl(True)    # NEW: still swirling
             return
 
