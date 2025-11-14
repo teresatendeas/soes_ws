@@ -4,9 +4,7 @@ soes_state:
     # ========================
     # --- TIMING PARAMETERS ---
     # ========================
-    settle_before_pump_s: 4.0
-    pump_on_s: 5.0
-    swirl_time_s: 5.0
+    settle_before_pump_s: 2.0
     order: [0, 1, 2]
 
     # ========================
