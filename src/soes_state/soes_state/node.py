@@ -74,7 +74,7 @@ class StateNode(Node):
         self.pump = PumpController(self._pump_on, self._pump_off)
 
         # ---------- Runtime ----------
-        self.phase = Phase.INIT_POS # <-------------------------------------------------------- CHANGE THIS
+        self.phase = Phase.TEST_MOTOR # <-------------------------------------------------------- CHANGE THIS
         #self.phase = Phase.INIT_POS
         self.phase_t0 = self.get_clock().now()
         self.quality_flag = False
@@ -123,48 +123,129 @@ class StateNode(Node):
             t = self._elapsed()
             period = self.test_period_s
 
+            # Which part of the test sequence we are in
+            # 0: J0 one-by-one
+            # 1: J1 one-by-one
+            # 2: J2 one-by-one
+            # 3: Servo 180° front/back
+            # 4: All joints together
+            # >=5: Pump swirl (+5 rev, pause, -5 rev, pause)
+            segment = int(t // period)
+
+            # Base joint command
+            jt = JointTargets()
+            jt.position = [0.0, 0.0, 0.0, 0.0]   # q0, q1, q2, servo
+            jt.velocity = [0.0, 0.0, 0.0, 0.0]   # v0, v1, v2, pump (via vel[3])
+            jt.use_velocity = False              # default = position mode
+
+            # Servo neutral (for phases where it shouldn't move)
+            servo_neutral_deg = 90.0
+            jt.position[3] = math.radians(servo_neutral_deg)
+
+            # PumpCmd default OFF (we'll drive pump via vel[3] in pump phase)
+            pump_msg = PumpCmd()
+            pump_msg.on = False
+            pump_msg.duty = 0.0
+            pump_msg.duration_s = 0.0
+
             # Flip direction every 'period' seconds: +1, -1, +1, ...
             direction = 1.0 if int(t / period) % 2 == 0 else -1.0
 
-            # Cycle index 0 -> 1 -> 2 -> 0 ... every period (for visualization / robothand)
-            test_index = int((t // period) % 3)
-            self._publish_index(test_index)
+            # 360° for arm steppers, 180° for servo
+            amp_rad = math.radians(360.0)  # 2π rad
+            servo_low_deg, servo_high_deg = 0.0, 180.0
 
-            # --- Pump: keep ON during test (you can also toggle per half-period if preferred)
-            pump_msg = PumpCmd()
-            pump_msg.on = True
-            pump_msg.duty = 1.0
-            pump_msg.duration_s = 0.0
+            mode = ""
+
+            # --------- ARM + SERVO SEQUENCE ---------
+            if segment == 0:
+                # Joint 0 only: ±360°
+                jt.position[0] = direction * amp_rad
+                mode = "J0 one-by-one 360°"
+            elif segment == 1:
+                # Joint 1 only: ±360°
+                jt.position[1] = direction * amp_rad
+                mode = "J1 one-by-one 360°"
+            elif segment == 2:
+                # Joint 2 only: ±360°
+                jt.position[2] = direction * amp_rad
+                mode = "J2 one-by-one 360°"
+            elif segment == 3:
+                # Servo only: 0° ↔ 180°
+                servo_deg = servo_high_deg if direction > 0 else servo_low_deg
+                jt.position[3] = math.radians(servo_deg)
+                mode = "Servo 180° front/back"
+            elif segment == 4:
+                # All 3 arm motors: ±360°, servo 0°/180° together
+                jt.position[0] = direction * amp_rad
+                jt.position[1] = direction * amp_rad
+                jt.position[2] = direction * amp_rad
+                servo_deg = servo_high_deg if direction > 0 else servo_low_deg
+                jt.position[3] = math.radians(servo_deg)
+                mode = "All 3 steppers 360° + servo 180°"
+            else:
+                # --------- PUMP SWIRL PHASE (J3 via velocity) ---------
+                # ESP side:
+                #   pos[3] = servo angle
+                #   vel[3] = pump stepper velocity
+                jt.use_velocity = True
+
+                # Arms stay at rest
+                jt.position[0] = 0.0
+                jt.position[1] = 0.0
+                jt.position[2] = 0.0
+
+                # Servo stays neutral
+                jt.position[3] = math.radians(servo_neutral_deg)
+
+                # Time since the pump phase started
+                t_pump = t - 5 * period
+
+                pump_speed = 10.0  # rad/s; adjust if you want slower/faster swirl
+                rev = 5.0
+                # Time needed for 5 revolutions at pump_speed
+                swirl_time = (rev * 2.0 * math.pi) / pump_speed
+
+                # Pattern:
+                #   0          .. swirl_time        -> +5 rev
+                #   swirl_time .. swirl_time+3      -> pause 3 s
+                #   ...        .. 2*swirl_time+3    -> -5 rev
+                #   ...        .. 2*swirl_time+6    -> pause 3 s
+                if t_pump < swirl_time:
+                    jt.velocity[3] = pump_speed
+                    mode = "Pump +5 rev"
+                elif t_pump < swirl_time + 3.0:
+                    jt.velocity[3] = 0.0
+                    mode = "Pump pause after +5 rev"
+                elif t_pump < 2 * swirl_time + 3.0:
+                    jt.velocity[3] = -pump_speed
+                    mode = "Pump -5 rev"
+                elif t_pump < 2 * swirl_time + 6.0:
+                    jt.velocity[3] = 0.0
+                    mode = "Pump pause after -5 rev"
+                else:
+                    jt.velocity[3] = 0.0
+                    mode = "Pump sequence done"
+                    # Optional: auto-exit TEST_MOTOR here
+                    # self._enter(Phase.INIT_POS)
+                    # self.arm_pub.publish(jt)
+                    # return
+
+            # Publish pump command (still sent for compatibility)
             self.pump_pub.publish(pump_msg)
 
-            # --- 3 steppers + 1 servo command on /arm/joint_targets
-            # Steppers (rad): ±amplitude following 'direction'
-            q0 = direction * float(self.test_amp_rad[0])  # stepper 1
-            q1 = direction * float(self.test_amp_rad[1])  # stepper 2
-            q2 = direction * float(self.test_amp_rad[2])  # stepper 3
-
-            # Servo (rad): toggle between low/high angles (deg -> rad)
-            servo_low_deg, servo_high_deg = float(self.test_servo_deg[0]), float(self.test_servo_deg[1])
-            servo_deg = servo_high_deg if direction > 0 else servo_low_deg
-            q3 = math.radians(servo_deg)
-
-            jt = JointTargets()
-            jt.position = [q0, q1, q2, q3]
-            jt.velocity = [0.0, 0.0, 0.0, 0.0]  # state node just sets poses for test
-            jt.use_velocity = False
+            # Send joint targets to I2C bridge
             self.arm_pub.publish(jt)
 
             # Log once per second to avoid spam
             if int(t) != int(t - 0.05):
                 self.get_logger().info(
-                    f'[TEST_MOTOR] dir={"+":"-"[direction<0]} '
-                    f'idx={test_index} joints(rad)={[round(a,3) for a in jt.position]}'
+                    f"[TEST_MOTOR] seg={segment} mode={mode} "
+                    f"dir={'+' if direction > 0 else '-'} "
+                    f"pos={[round(a,3) for a in jt.position]} "
+                    f"vel={[round(v,3) for v in jt.velocity]}"
                 )
 
-            # (Optional) auto-exit test after 30s:
-            # if t > 30.0:
-            #     self._enter(Phase.INIT_POS)
-            #     self._publish_index(-1)
             return  # do not run the normal sequence below
 
         # ======== NORMAL SEQUENCE ========
