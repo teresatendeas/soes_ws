@@ -25,7 +25,7 @@ class RoboHandNode(Node):
         super().__init__('soes_robothand')
 
         # Control Parameters:
-        self.declare_parameter('rate_hz', 50.0)  # Control Update Rate
+        self.declare_parameter('rate_hz', 20.0)  # Control Update Rate
         self.declare_parameter('pos_tol_m', 0.003)  # Position Tolerance
         self.declare_parameter('settle_s', 0.20)  # Settling time before switching phases
 
