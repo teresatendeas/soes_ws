@@ -196,13 +196,8 @@ class StateNode(Node):
             self.get_logger().info('Pump OFF')
 
         if t >= (self.t_settle + self.t_pump + self.t_swirl):
-            if self.phase == Phase.STEP0:
-                self._step_idx = 1; self._start_step(self._step_idx)
-            elif self.phase == Phase.STEP1:
-                self._step_idx = 2; self._start_step(self._step_idx)
-            else:
-                self._publish_index(-1)  # back to HOME
-                self._enter(Phase.CAMERA)
+            return True
+        return False
 
     # ---------- TEST_MOTOR helper (same as your version) ----------
     def _test_motor_tick(self):
