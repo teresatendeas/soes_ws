@@ -38,7 +38,7 @@ class RoboHandNode(Node):
         # -------- Geometry (L1..L4) --------
         self.declare_parameter('link_lengths_m', [0.00, 0.14, 0.12, 0.04])  # [L1,L2,L3,L4]
 
-        # -------- IK tuning --------
+        # --------  tuning --------
         self.declare_parameter('kp_cart', 3.0)
         self.declare_parameter('damping_lambda', 0.1)
         self.declare_parameter('qdot_limit_rad_s', [1.5, 1.5, 1.5, 1.5])
@@ -194,8 +194,6 @@ class RoboHandNode(Node):
         self._publish_targets(self.q, np.zeros(4), use_velocity=False)
         at = float(np.linalg.norm(err)) <= self.home_tol
         self._publish_at(at)
-        if at:
-            self.get_logger().info("[HOME] Reached")
         
         return at
 
@@ -224,8 +222,6 @@ class RoboHandNode(Node):
             self.last_within_tol is not None and
             (self.get_clock().now() - self.last_within_tol) >= Duration(seconds=self.settle_s)
         )
-        if at:
-            self.get_logger().info("[IK] Target settled, IK complete")
 
         self._publish_at(at)
         return at
