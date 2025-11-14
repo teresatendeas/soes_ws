@@ -6,13 +6,13 @@ soes_robothand:
     # ======================
 
     # Control loop update rate [Hz]
-    rate_hz: 50.0                # 50 Hz is a good default
+    rate_hz: 20.0                # 50 Hz is a good default
 
     # Position tolerance [m] to consider "at target"
-    pos_tol_m: 0.003             # 3 mm
+    pos_tol_m: 0.01             # 1 cm
 
     # Time to remain within tolerance before switching phases [s]
-    settle_s: 0.20
+    settle_s: 3.00
 
     # =======================
     # --- LINK GEOMETRY -----
@@ -27,10 +27,10 @@ soes_robothand:
     # =======================
 
     # Task-space proportional gain [1/s]
-    kp_cart: 3.0
+    kp_cart: 1.0
 
     # Damping factor λ for Damped Least Squares IK
-    damping_lambda: 0.1
+    damping_lambda: 0.4
 
     # Joint limits and velocity bounds
     joint_limits:
