@@ -171,26 +171,43 @@ class StateNode(Node):
             # WAIT for robothand to confirm it is at HOME (via /arm/at_target)
             if self.arm_at and self.arm_at_since is not None:
                 if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
-                    self.get_logger().info("INIT_POS complete → STEP0")
-                    self._step_idx = 0
-                    self._enter(Phase.STEP0)
-                    self._start_step(0)
+
+                    #NEW SEQUENCE LOGIC
+                    if self._step_idx == 0:
+                        # self._step_idx = 0  # COMMENTED: no longer needed, already 0
+                        self._start_step(0)
+                        
+                    elif self._step_idx == 1:
+                        self._start_step(1)
+                        
+                    elif self._step_idx == 2:
+                        self._start_step(2)
+                        
+                    else:
+                        # After STEP2 → INIT_POS → CAMERA
+                        self._enter(Phase.CAMERA)
+                        
         elif self.phase == Phase.STEP0:
             if self._run_step():
-                self.get_logger().info("STEP0 complete → STEP1")
-                self._step_idx = 1
-                self._enter(Phase.STEP1)
-                self._start_step(1)
+                self.get_logger().info("STEP0 complete → STEP1") #For checking
+                self._step_idx = 1 #NEXT is STEP1 after INIT_POS
+                self._publish_index(-1)
+                self._enter(Phase.INIT_POS)
+                
         elif self.phase == Phase.STEP1:
             if self._run_step():
                 self.get_logger().info("STEP1 complete → STEP2")
                 self._step_idx = 2
-                self._enter(Phase.STEP2)
-                self._start_step(2)
+                self._publish_index(-1)
+                self._enter(Phase.INIT_POS)
+                
         elif self.phase == Phase.STEP2:
             if self._run_step():
                 self.get_logger().info("STEP2 complete → CAMERA")
-                self._enter(Phase.INIT_POS) # GANTI INI
+                self._step_idx = 3 #Do we need this or not ya? I feel like gaperlu but incase aja
+                self._publish_index(-1)
+                self._enter(Phase.INIT_POS)
+                
         elif self.phase == Phase.CAMERA:
             if self._elapsed() >= self.cam_to:
                 if self.quality_flag:
@@ -211,6 +228,7 @@ class StateNode(Node):
             
             # restart the cycle
             self._publish_index(-1)     # back to HOME
+            self._step_idx = 0          # NEW: reset sequence
             self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.IDLE:
