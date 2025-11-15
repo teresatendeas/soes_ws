@@ -78,7 +78,8 @@ class VisionNode(Node):
         msg_q.header.stamp = msg_c.header.stamp
         msg_q.diameter_mm = diameters
         msg_q.score = [1.0] * len(diameters)
-        msg_q.needs_human = (len(diameters) > 0 and max(diameters)-min(diameters) > 3.0)
+        msg_q.needs_human = False
+        #msg_q.needs_human = (len(diameters) > 0 and max(diameters)-min(diameters) > 3.0)
 
         self.pub_quality.publish(msg_q)
 
