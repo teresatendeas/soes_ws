@@ -262,41 +262,79 @@ class StateNode(Node):
 
     # ---------- TEST_MOTOR helper ----------
     def _test_motor_tick(self):
+        """
+        Simple hardware test:
+          seg0: J0 swings ±test_amp_rad[0]
+          seg1: J1 swings ±test_amp_rad[1]
+          seg2: J2 swings ±test_amp_rad[2]
+          seg3: servo toggles between low/high degrees
+          seg4: all joints move together
+          seg5+: pump ON (constant), joints neutral
+        """
         t = self._elapsed()
         period = self.test_period_s
+
+        # segment index increases every `period` seconds
         segment = int(t // period)
-        direction = 1.0 if int(t / period) % 2 == 0 else -1.0
+
+        # direction flips every full period: +1, -1, +1, -1, ...
+        direction = 1.0 if (segment % 2) == 0 else -1.0
 
         jt = JointTargets()
         jt.position = [0.0, 0.0, 0.0, 0.0]
         jt.velocity = [0.0, 0.0, 0.0, 0.0]
-        jt.use_velocity = False
+        jt.use_velocity = False  # we stay in position mode for tests
 
+        # Servo neutral / range from parameters
         servo_neutral_deg = 90.0
+        servo_low_deg, servo_high_deg = self.test_servo_deg
         jt.position[3] = math.radians(servo_neutral_deg)
-        pump_msg = PumpCmd(); pump_msg.on = False; pump_msg.duty = 0.0; pump_msg.duration_s = 0.0
 
-        amp_rad = math.radians(360.0)
-        servo_low_deg, servo_high_deg = 0.0, 180.0
+        # Base pump command (OFF by default)
+        pump_msg = PumpCmd()
+        pump_msg.on = False
+        pump_msg.duty = 0.0
+        pump_msg.duration_s = 0.0
 
-        if   segment == 0: jt.position[0] = direction * amp_rad
-        elif segment == 1: jt.position[1] = direction * amp_rad
-        elif segment == 2: jt.position[2] = direction * amp_rad
+        # Use configured amplitudes from parameters
+        amp0, amp1, amp2 = self.test_amp_rad
+
+        if segment == 0:
+            # Test J0 only
+            jt.position[0] = direction * amp0
+
+        elif segment == 1:
+            # Test J1 only
+            jt.position[1] = direction * amp1
+
+        elif segment == 2:
+            # Test J2 only
+            jt.position[2] = direction * amp2
+
         elif segment == 3:
-            jt.position[3] = math.radians(servo_high_deg if direction > 0 else servo_low_deg)
-        elif segment == 4:
-            jt.position[0] = direction * amp_rad
-            jt.position[1] = direction * amp_rad
-            jt.position[2] = direction * amp_rad
-            jt.position[3] = math.radians(servo_high_deg if direction > 0 else servo_low_deg)
-        else:
-            jt.use_velocity = True
-            jt.position[3] = math.radians(servo_neutral_deg)
-            pump_speed = 10.0
-            jt.velocity[3] = pump_speed
+            # Test servo: flip between low/high angles
+            angle_deg = servo_high_deg if direction > 0 else servo_low_deg
+            jt.position[3] = math.radians(angle_deg)
 
+        elif segment == 4:
+            # All joints move together
+            jt.position[0] = direction * amp0
+            jt.position[1] = direction * amp1
+            jt.position[2] = direction * amp2
+            angle_deg = servo_high_deg if direction > 0 else servo_low_deg
+            jt.position[3] = math.radians(angle_deg)
+
+        else:
+            # Pump test only: joints neutral, pump ON at full duty
+            jt.position = [0.0, 0.0, 0.0, math.radians(servo_neutral_deg)]
+            pump_msg.on = True
+            pump_msg.duty = 1.0
+            pump_msg.duration_s = 0.0  # continuous until we leave TEST_MOTOR
+
+        # Publish commands
         self.pump_pub.publish(pump_msg)
         self.arm_pub.publish(jt)
+
 
 
 def main():
