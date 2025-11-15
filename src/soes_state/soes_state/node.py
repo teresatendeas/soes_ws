@@ -297,25 +297,25 @@ class StateNode(Node):
         self._enter(Phase.STEP0 if step_idx == 0 else Phase.STEP1 if step_idx == 1 else Phase.STEP2)
  
     def _vision_recent_and_valid(self) -> bool:
-    """
-    More robust detection validity check:
-      - Allow small timing jitter
-      - Require at least 2 detections (more stable)
-    """
-    if self.last_centers_time is None:
-        return False
+        """
+        More robust detection validity check:
+          - Allow small timing jitter
+          - Require at least 1 detection (minimum requirement)
+        """
+        if self.last_centers_time is None:
+            return False
 
-    elapsed = (self.get_clock().now() - self.last_centers_time).nanoseconds * 1e-9
+        elapsed = (self.get_clock().now() - self.last_centers_time).nanoseconds * 1e-9
 
-    # allow 2 × timeout to avoid flicker failures
-    if elapsed > (self.cam_to * 2.0):
-        return False
+        # allow 2 × timeout to avoid flicker failures
+        if elapsed > (self.cam_to * 2.0):
+            return False
 
-    # Require at least 2 cupcake detections before accepting (more stable)
-    if self.centers_detected < 1:
-        return False
+        # Require at least 1 cupcake detection
+        if self.centers_detected < 1:
+            return False
 
-    return True
+        return True
   
     def _run_step(self):
         """
