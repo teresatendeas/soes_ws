@@ -1,34 +1,10 @@
 soes_vision:
   ros__parameters:
 
-    # Camera settings (Kalau conflict sama pre-setnya hapus aja)
-    camera_id: 0                 # /dev/video0
-    frame_width: 640             # optional
-    frame_height: 480            # optional
-    fps: 30                      # request camera FPS
-
-    # Behavior flags
-    visualize: true              # show OpenCV debug window
-    publish_rate_hz: 10.0        # rate to publish CupcakeCenters
+    # Camera settings
+    camera_index: 0        # must match node.py (NOT camera_id)
+    publish_rate_hz: 10.0  # rate at which detection runs and publishes
     frame_id: "camera_frame"
 
-    # Detection settings (adjust depending on your pipeline)
-    hsv_lower: [0, 0, 0]         # example threshold
-    hsv_upper: [180, 255, 255]
-    blur_ksize: 5
-    min_area_px: 200
-
-    # Expected number of targets (e.g. 3 cupcake centers)
-    num_centers: 3
-
-    # Optional fallback values (if detection fails)
-    default_centers_m:
-      - 0.0
-      - 0.0
-      - 0.10
-      - 0.0
-      - 0.0
-      - 0.10
-      - 0.0
-      - 0.0
-      - 0.10
+    # Visualization
+    visualize: true        # show OpenCV debug window
