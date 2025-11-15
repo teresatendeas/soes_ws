@@ -36,9 +36,9 @@ class VisionNode(Node):
         # ---- open camera ----
         self.cap = cv2.VideoCapture(self.cam_index)
         if not self.cap.isOpened():
-            self.get_logger().error("failed to open camera index")
+            self.get_logger().error(f"Failed to open camera index {self.cam_index}")
         else:
-            self.get_logger().info("VisionNode camera opened at index")
+            self.get_logger().info(f"VisionNode camera opened at index {self.cam_index}")
 
         self.timer = self.create_timer(1.0 / self.rate, self._on_timer)
         self.get_logger().info("SOES VisionNode started.")
