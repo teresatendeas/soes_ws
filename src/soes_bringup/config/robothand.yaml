@@ -22,4 +22,4 @@ soes_robothand:
     turns: 3
     alpha: -0.03
     height: 0.04
-    omega: 0.5
+    omega: 3
