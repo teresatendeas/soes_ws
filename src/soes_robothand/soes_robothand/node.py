@@ -107,6 +107,9 @@ class RoboHandNode(Node):
         self.spiral_theta = 0.0
         self.spiral_center: Optional[np.ndarray] = None
 
+        # Logging helpers
+        self._home_done_logged = False  # ensure "arrived HOME" logged once
+
         self.timer = self.create_timer(self.dt, self._tick)
         self.get_logger().info('soes_robothand: HOME first, then MOVE/SWIRL on index.')
 
@@ -124,9 +127,14 @@ class RoboHandNode(Node):
 
     # ------------- Phase selection -------------
     def _align_phase_with_index(self):
+        # Moving to init pos (HOME)
         if self.active_index == -1:
+            self.get_logger().info("[ROBOHAND] Moving to init pos (HOME)")
             self._enter(Phase.HOME, None)
-        elif self.active_index in (0,1,2) and self.centers and len(self.centers) >= 3:
+        # Moving to one of the cupcake positions
+        elif self.active_index in (0, 1, 2) and self.centers and len(self.centers) >= 3:
+            label = f"pos{self.active_index + 1}"
+            self.get_logger().info(f"[ROBOHAND] Moving to {label}")
             self._enter(Phase.MOVE, np.array(self.centers[self.active_index], dtype=float))
         else:
             self._enter(Phase.WAIT, None)
@@ -136,6 +144,11 @@ class RoboHandNode(Node):
         self.phase_t0 = self.get_clock().now()
         self.last_within_tol = None
         self.des_xyz = xyz.copy() if xyz is not None else None
+
+        # Reset HOME arrival logging when entering HOME
+        if new_phase == Phase.HOME:
+            self._home_done_logged = False
+
         self.get_logger().info(f"[ROBOHAND] -> {self.phase.name} des={self.des_xyz if xyz is not None else None}")
 
     def _elapsed(self) -> float:
@@ -194,7 +207,12 @@ class RoboHandNode(Node):
         self._publish_targets(self.q, np.zeros(4), use_velocity=False)
         at = float(np.linalg.norm(err)) <= self.home_tol
         self._publish_at(at)
-        
+
+        # Log once when HOME reached
+        if at and not self._home_done_logged:
+            self.get_logger().info("[ROBOHAND] Arrived at init pos (HOME)")
+            self._home_done_logged = True
+
         return at
 
     def _ik_step(self, des_xyz: np.ndarray, xdot_ff: Optional[np.ndarray] = None) -> bool:
@@ -231,6 +249,10 @@ class RoboHandNode(Node):
         # prepare spiral about current center
         if self.centers is None or self.active_index not in (0,1,2):
             return
+
+        label = f"pos{self.active_index + 1}"
+        self.get_logger().info(f"[ROBOHAND] Arrived at {label}, starting swirl")
+
         self.spiral_center = np.array(self.centers[self.active_index], dtype=float)
         self.spiral_theta = 0.0
         self._enter(Phase.SWIRL, self.spiral_center.copy())
@@ -281,7 +303,8 @@ class RoboHandNode(Node):
             self.spiral_theta += self.omega * self.dt
 
             if self.spiral_theta >= self.theta_max:
-                self.get_logger().info("[SWIRL] Completed full spiral")
+                label = f"pos{self.active_index + 1}" if self.active_index in (0,1,2) else "current position"
+                self.get_logger().info(f"[SWIRL] Swirl done at {label}")
                 self._enter(Phase.WAIT, None)
                 self._publish_swirl(False)   # NEW: SWIRL ended
             else:
