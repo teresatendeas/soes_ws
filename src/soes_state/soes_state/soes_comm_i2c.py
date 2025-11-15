@@ -100,10 +100,10 @@ class I2CBridge(Node):
 
         self._i2c_send_raw(frame)
 
-        # if self.debug:
-        #     self.get_logger().info(
-        #         f'I2C 0x03 -> use_vel={use_velocity}, '
-        #         f'pos_s16={pos_s16}, vel_s16={vel_s16}'
+        if self.debug:
+            self.get_logger().info(
+                f'I2C 0x03 -> use_vel={use_velocity}, '
+                f'pos_s16={pos_s16}, vel_s16={vel_s16}'
             )
 
     # -------------------------------------------------------------------------
