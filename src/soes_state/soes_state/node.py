@@ -6,7 +6,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.duration import Duration
 
 from std_msgs.msg import Bool, Int32
-from soes_msgs.msg import PumpCmd, VisionQuality, JointTargets, CupcakeCenters
+from soes_msgs.msg import PumpCmd, VisionQuality, JointTargets
 from soes_msgs.srv import RollTray
 
 from .utils import PumpController
@@ -61,7 +61,6 @@ class StateNode(Node):
         self.pump_pub  = self.create_publisher(PumpCmd, '/pump/cmd', 1)
         self.roll_cli  = self.create_client(RollTray, '/tray/roll')
         self.qual_sub  = self.create_subscription(VisionQuality, '/vision/quality', self.on_quality, qos)
-        self.centers_sub = self.create_subscription(CupcakeCenters,'/vision/centers', self.on_centers, qos) # NEW
         self.arm_pub   = self.create_publisher(JointTargets, '/arm/joint_targets', 10)
 
         # NEW: subscribe to /arm/at_target to GATE transitions
@@ -80,11 +79,6 @@ class StateNode(Node):
 
         # Pump helper
         self.pump = PumpController(self._pump_on, self._pump_off)
-
-        # ---------- Vision tracking ----------
-        # Track latest centers message time and how many centers were detected
-        self.last_centers_time = None   # rclpy Time message
-        self.centers_detected = 0        
 
         # ---------- Runtime ----------
         self.phase = Phase.INIT_POS      # set TEST_MOTOR or INIT_POS
@@ -105,8 +99,6 @@ class StateNode(Node):
         self.phase = new_phase
         self.phase_t0 = self.get_clock().now()
         self._did_start_pump = False
-        # reset camera attempt flag whenever we enter a new phase
-        self._camera_tried = False
         self.get_logger().info(f'[STATE] -> {self.phase.name}')
 
     def _elapsed(self) -> float:
@@ -138,44 +130,17 @@ class StateNode(Node):
         """
         /esp_switch_on:
           - False -> force state machine into IDLE
-          - True  -> if currently IDLE, restart from INIT_POS (only if no outstanding quality_flag)
+          - True  -> if currently IDLE, restart from INIT_POS
         """
         self.switch_on = bool(msg.data)
-
-        if not self.switch_on:
-            # Switch OFF -> immediately enter IDLE and stop pump
-            if self.phase != Phase.IDLE:
-                self.get_logger().warn('ESP switch OFF -> entering IDLE.')
-                self.pump.stop()
-                self._publish_index(-1)
-                self._enter(Phase.IDLE)
-            return
-
-        # Switch turned ON
-        if self.phase == Phase.IDLE:
-            if self.quality_flag:
-                self.get_logger().warn('ESP switch ON ignored: vision requests human attention (quality_flag). Clear flag before restarting.')
-            else:
-                self.get_logger().info('ESP switch ON -> restarting from INIT_POS.')
-                self._publish_index(-1)
-                self._enter(Phase.INIT_POS)
 
     def _on_swirl(self, msg: Bool):      # NEW
         """Track when RoboHand is in SWIRL phase."""  # NEW
         self.swirl_active = bool(msg.data)           # NEW
 
-    # ---------- Vision callbacks ----------
+    # ---------- Callbacks ----------
     def on_quality(self, msg: VisionQuality):
-        # VisionQuality.needs_human -> True means operator attention required
         self.quality_flag = bool(msg.needs_human)
-        if self.quality_flag:
-            self.get_logger().warn('Vision reports needs_human=True (quality_flag set).')
-
-    def on_centers(self, msg: CupcakeCenters):
-        # Update last seen time and count of centers
-        self.last_centers_time = self.get_clock().now()
-        self.centers_detected = len(msg.centers)
-        self.get_logger().debug(f'Vision centers received: {self.centers_detected}')
 
     # ---------- Main tick ----------
     def tick(self):
@@ -200,79 +165,38 @@ class StateNode(Node):
                 self._publish_index(-1)   # command HOME again
                 self._enter(Phase.INIT_POS)
                 # fall through into normal INIT_POS handling below
-        
-        # If vision demanded human attention, ensure we do not proceed
-        if self.quality_flag and self.phase != Phase.IDLE:
-            # If a quality flag appears mid-cycle, immediately pause operation
-            self.get_logger().warn('Vision requires human attention -> pausing into IDLE.')
-            self.pump.stop()
-            self._publish_index(-1)
-            self._enter(Phase.IDLE)
-            return
 
         # ======== NORMAL SEQUENCE ========
         if self.phase == Phase.INIT_POS:
             # WAIT for robothand to confirm it is at HOME (via /arm/at_target)
             if self.arm_at and self.arm_at_since is not None:
                 if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
-
-                    #NEW SEQUENCE LOGIC
-                    if self._step_idx == 0:
-                        # self._step_idx = 0  # COMMENTED: no longer needed, already 0
-                        self._start_step(0)
-                        
-                    elif self._step_idx == 1:
-                        self._start_step(1)
-                        
-                    elif self._step_idx == 2:
-                        self._start_step(2)
-                        
+                    self.get_logger().info("INIT_POS complete → STEP0")
+                    self._step_idx = 0
+                    self._enter(Phase.STEP0)
+                    self._start_step(0)
         elif self.phase == Phase.STEP0:
             if self._run_step():
-                self.get_logger().info("STEP0 complete → STEP1") #For checking
-                self._step_idx = 1 #NEXT is STEP1 after INIT_POS
-                self._publish_index(-1)
-                self._enter(Phase.INIT_POS)
-                
+                self.get_logger().info("STEP0 complete → STEP1")
+                self._step_idx = 1
+                self._enter(Phase.STEP1)
+                self._start_step(1)
         elif self.phase == Phase.STEP1:
             if self._run_step():
                 self.get_logger().info("STEP1 complete → STEP2")
                 self._step_idx = 2
-                self._publish_index(-1)
-                self._enter(Phase.INIT_POS)
-                
+                self._enter(Phase.STEP2)
+                self._start_step(2)
         elif self.phase == Phase.STEP2:
             if self._run_step():
                 self.get_logger().info("STEP2 complete → CAMERA")
-                # reset step index now that sequence is done
-                self._step_idx = 0
-                # command HOME for stability (as before)
-                self._publish_index(-1)
-                # immediately transition to CAMERA phase (single attempt)
-                self._enter(Phase.CAMERA)
-
+                self._enter(Phase.INIT_POS) # GANTI INI
         elif self.phase == Phase.CAMERA:
-            # Single non-blocking camera attempt (Option B):
-            # - Try once to validate vision
-            # - Log WARN if vision or quality is bad
-            # - In all cases: proceed to ROLL_TRAY (do NOT enter IDLE)
-            if not getattr(self, '_camera_tried', False):
-                self._camera_tried = True
-
-                # log original camera timeout/quality if present
+            if self._elapsed() >= self.cam_to:
                 if self.quality_flag:
-                    self.get_logger().warn('CAMERA: quality_flag set (vision requests human attention) — proceeding to ROLL_TRAY anyway.')
-
-                # check vision quickly (uses last_centers_time and centers_detected)
-                if not self._vision_recent_and_valid():
-                    self.get_logger().warn('CAMERA: vision did not report valid detections on attempt — proceeding to ROLL_TRAY anyway.')
+                    self.get_logger().warn('quality check requests attention.')
                 else:
-                    self.get_logger().info('CAMERA: vision OK on single attempt — proceeding to ROLL_TRAY.')
-
-                # immediately proceed to rolling the tray
-                self._enter(Phase.ROLL_TRAY)
-            else:
-                # If for some reason CAMERA re-enters tick with tried==True, advance to ROLL_TRAY
+                    self.get_logger().info('quality check OK.')
                 self._enter(Phase.ROLL_TRAY)
                 
         elif self.phase == Phase.ROLL_TRAY:
@@ -287,10 +211,6 @@ class StateNode(Node):
             
             # restart the cycle
             self._publish_index(-1)     # back to HOME
-            self._step_idx = 0          # NEW: reset sequence
-            self.quality_flag = False
-            self.last_centers_time = None
-            self.centers_detected = 0
             self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.IDLE:
@@ -301,28 +221,7 @@ class StateNode(Node):
         idx = self.order[step_idx]
         self._publish_index(idx)
         self._enter(Phase.STEP0 if step_idx == 0 else Phase.STEP1 if step_idx == 1 else Phase.STEP2)
- 
-    def _vision_recent_and_valid(self) -> bool:
-        """
-        More robust detection validity check:
-          - Allow small timing jitter
-          - Require at least 1 detection (minimum requirement)
-        """
-        if self.last_centers_time is None:
-            return False
 
-        elapsed = (self.get_clock().now() - self.last_centers_time).nanoseconds * 1e-9
-
-        # allow 2 × timeout to avoid flicker failures
-        if elapsed > (self.cam_to * 2.0):
-            return False
-
-        # Require at least 1 cupcake detection
-        if self.centers_detected < 1:
-            return False
-
-        return True
-  
     def _run_step(self):
         """
         CHANGED: Pump now follows RoboHand SWIRL phase:
