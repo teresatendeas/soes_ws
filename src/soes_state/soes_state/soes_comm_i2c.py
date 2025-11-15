@@ -59,17 +59,12 @@ class I2CBridge(Node):
     # -------------------------------------------------------------------------
     def on_pump(self, msg: PumpCmd):
         on_u8 = 1 if msg.on else 0
-        duty_u8 = int(max(0.0, min(1.0, msg.duty)) * 100)
-        duration_ms = int(max(0.0, msg.duration_s) * 1000.0)
 
-        # CMD 0x01 frame: [cmd, on_u8, duty%, reserved, duration_ms (u16)]
-        frame = struct.pack('<BBBBH', 0x01, on_u8, duty_u8, 0x00, duration_ms)
+        frame = struct.pack('<BB', 0x10, on_u8)
         self._i2c_send_raw(frame)
 
         if self.debug:
-            self.get_logger().info(
-                f'I2C PUMP -> on={on_u8}, duty%={duty_u8}, dur_ms={duration_ms}'
-            )
+            self.get_logger().info(f'I2C PUMP (0x10) -> on={on_u8}')
 
     # -------------------------------------------------------------------------
     #  Joint command (write-only)
