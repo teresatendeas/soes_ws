@@ -105,6 +105,8 @@ class StateNode(Node):
         self.phase = new_phase
         self.phase_t0 = self.get_clock().now()
         self._did_start_pump = False
+        # reset camera attempt flag whenever we enter a new phase
+        self._camera_tried = False
         self.get_logger().info(f'[STATE] -> {self.phase.name}')
 
     def _elapsed(self) -> float:
@@ -225,10 +227,6 @@ class StateNode(Node):
                     elif self._step_idx == 2:
                         self._start_step(2)
                         
-                    else:
-                        # After STEP2 → INIT_POS → CAMERA
-                        self._enter(Phase.CAMERA)
-                        
         elif self.phase == Phase.STEP0:
             if self._run_step():
                 self.get_logger().info("STEP0 complete → STEP1") #For checking
@@ -246,27 +244,35 @@ class StateNode(Node):
         elif self.phase == Phase.STEP2:
             if self._run_step():
                 self.get_logger().info("STEP2 complete → CAMERA")
-                self._step_idx = 3 #Do we need this or not ya? I feel like gaperlu but incase aja
+                # reset step index now that sequence is done
+                self._step_idx = 0
+                # command HOME for stability (as before)
                 self._publish_index(-1)
-                self._enter(Phase.INIT_POS)
-                
+                # immediately transition to CAMERA phase (single attempt)
+                self._enter(Phase.CAMERA)
+
         elif self.phase == Phase.CAMERA:
-            if self._elapsed() >= self.cam_to:
+            # Single non-blocking camera attempt (Option B):
+            # - Try once to validate vision
+            # - Log WARN if vision or quality is bad
+            # - In all cases: proceed to ROLL_TRAY (do NOT enter IDLE)
+            if not getattr(self, '_camera_tried', False):
+                self._camera_tried = True
+
+                # log original camera timeout/quality if present
                 if self.quality_flag:
-                    self.get_logger().warn('quality check requests human attention -> entering IDLE.')
-                    self.pump.stop()
-                    self._publish_index(-1)
-                    self._enter(Phase.IDLE)
-                    return
+                    self.get_logger().warn('CAMERA: quality_flag set (vision requests human attention) — proceeding to ROLL_TRAY anyway.')
 
+                # check vision quickly (uses last_centers_time and centers_detected)
                 if not self._vision_recent_and_valid():
-                    self.get_logger().warn('No cupcakes detected by vision during CAMERA window -> entering IDLE.')
-                    self.pump.stop()
-                    self._publish_index(-1)
-                    self._enter(Phase.IDLE)
-                    return
+                    self.get_logger().warn('CAMERA: vision did not report valid detections on attempt — proceeding to ROLL_TRAY anyway.')
+                else:
+                    self.get_logger().info('CAMERA: vision OK on single attempt — proceeding to ROLL_TRAY.')
 
-                self.get_logger().info('Vision OK -> proceeding to ROLL_TRAY.')
+                # immediately proceed to rolling the tray
+                self._enter(Phase.ROLL_TRAY)
+            else:
+                # If for some reason CAMERA re-enters tick with tried==True, advance to ROLL_TRAY
                 self._enter(Phase.ROLL_TRAY)
                 
         elif self.phase == Phase.ROLL_TRAY:
