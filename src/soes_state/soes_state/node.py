@@ -63,19 +63,18 @@ class StateNode(Node):
         self.qual_sub  = self.create_subscription(VisionQuality, '/vision/quality', self.on_quality, qos)
         self.arm_pub   = self.create_publisher(JointTargets, '/arm/joint_targets', 10)
 
-        # NEW: subscribe to /arm/at_target to GATE transitions
+        # subscribe to /arm/at_target to GATE transitions
         self.arm_at       = False
         self.arm_at_since = None
         self.create_subscription(Bool, '/arm/at_target', self._on_at_target, 10)
 
-        # NEW: subscribe to /esp_switch_on to gate the whole state machine
+        # subscribe to /esp_switch_on to gate the whole state machine
         self.switch_on = False  # default OFF -> goes to IDLE until switch turns ON
         self.create_subscription(Bool, '/esp_switch_on', self._on_switch, 10)
 
-        # NEW: subscribe to /arm/swirl_active to control pump
-        self.swirl_active = False                                  # NEW
-        self.create_subscription(Bool, '/arm/swirl_active',        # NEW
-                                 self._on_swirl, 10)              # NEW
+        # subscribe to /arm/swirl_active to control pump
+        self.swirl_active = False
+        self.create_subscription(Bool, '/arm/swirl_active', self._on_swirl, 10)
 
         # Pump helper
         self.pump = PumpController(self._pump_on, self._pump_off)
@@ -95,26 +94,35 @@ class StateNode(Node):
         self._publish_index(-1)
 
     # ---------- Helpers ----------
-    def _enter(self, new_phase: Phase):
+    def _enter(self, new_phase: Phase, log: bool = True):  # UPDATED
         self.phase = new_phase
         self.phase_t0 = self.get_clock().now()
         self._did_start_pump = False
-        self.get_logger().info(f'[STATE] -> {self.phase.name}')
+        if log:
+            self.get_logger().info(f'[STATE] -> {self.phase.name}')
 
     def _elapsed(self) -> float:
         return (self.get_clock().now() - self.phase_t0).nanoseconds * 1e-9
 
-    def _publish_index(self, idx: int):
-        msg = Int32(); msg.data = int(idx)
+    def _publish_index(self, idx: int, log: bool = True):  # UPDATED
+        msg = Int32()
+        msg.data = int(idx)
         self.index_pub.publish(msg)
-        self.get_logger().info(f'active_index = {idx}')
+        if log:
+            self.get_logger().info(f'active_index = {idx}')
 
     def _pump_on(self, duty: float, duration_s: float):
-        msg = PumpCmd(); msg.on = True; msg.duty = float(duty); msg.duration_s = float(duration_s)
+        msg = PumpCmd()
+        msg.on = True
+        msg.duty = float(duty)
+        msg.duration_s = float(duration_s)
         self.pump_pub.publish(msg)
 
     def _pump_off(self):
-        msg = PumpCmd(); msg.on = False; msg.duty = 0.0; msg.duration_s = 0.0
+        msg = PumpCmd()
+        msg.on = False
+        msg.duty = 0.0
+        msg.duration_s = 0.0
         self.pump_pub.publish(msg)
 
     def _on_at_target(self, msg: Bool):
@@ -134,9 +142,9 @@ class StateNode(Node):
         """
         self.switch_on = bool(msg.data)
 
-    def _on_swirl(self, msg: Bool):      # NEW
-        """Track when RoboHand is in SWIRL phase."""  # NEW
-        self.swirl_active = bool(msg.data)           # NEW
+    def _on_swirl(self, msg: Bool):
+        """Track when RoboHand is in SWIRL phase."""
+        self.swirl_active = bool(msg.data)
 
     # ---------- Callbacks ----------
     def on_quality(self, msg: VisionQuality):
@@ -153,16 +161,16 @@ class StateNode(Node):
         if not self.switch_on:
             # Switch OFF → go/stay in IDLE, ensure pump OFF and arm commanded HOME
             if self.phase != Phase.IDLE:
-                self.get_logger().warn('ESP switch OFF → entering IDLE.')
+                # no logs when ESP switch is OFF
                 self.pump.stop()
-                self._publish_index(-1)   # go to HOME
-                self._enter(Phase.IDLE)
+                self._publish_index(-1, log=False)   # UPDATED: silent
+                self._enter(Phase.IDLE, log=False)   # UPDATED: silent
             return
         else:
             # Switch turned ON while in IDLE → restart from INIT_POS
             if self.phase == Phase.IDLE:
                 self.get_logger().info('ESP switch ON → restarting from INIT_POS.')
-                self._publish_index(-1)   # command HOME again
+                self._publish_index(-1)
                 self._enter(Phase.INIT_POS)
                 # fall through into normal INIT_POS handling below
 
@@ -172,42 +180,38 @@ class StateNode(Node):
             if self.arm_at and self.arm_at_since is not None:
                 if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
 
-                    #NEW SEQUENCE LOGIC
+                    # NEW SEQUENCE LOGIC
                     if self._step_idx == 0:
-                        # self._step_idx = 0  # COMMENTED: no longer needed, already 0
                         self._start_step(0)
-                        
                     elif self._step_idx == 1:
                         self._start_step(1)
-                        
                     elif self._step_idx == 2:
                         self._start_step(2)
-                        
                     else:
                         # After STEP2 → INIT_POS → CAMERA
                         self._enter(Phase.CAMERA)
-                        
+
         elif self.phase == Phase.STEP0:
             if self._run_step():
-                self.get_logger().info("STEP0 complete → STEP1") #For checking
-                self._step_idx = 1 #NEXT is STEP1 after INIT_POS
+                self.get_logger().info("STEP0 complete → STEP1")
+                self._step_idx = 1
                 self._publish_index(-1)
                 self._enter(Phase.INIT_POS)
-                
+
         elif self.phase == Phase.STEP1:
             if self._run_step():
                 self.get_logger().info("STEP1 complete → STEP2")
                 self._step_idx = 2
                 self._publish_index(-1)
                 self._enter(Phase.INIT_POS)
-                
+
         elif self.phase == Phase.STEP2:
             if self._run_step():
                 self.get_logger().info("STEP2 complete → CAMERA")
-                self._step_idx = 3 #Do we need this or not ya? I feel like gaperlu but incase aja
+                self._step_idx = 3  # optional, kept for completeness
                 self._publish_index(-1)
                 self._enter(Phase.INIT_POS)
-                
+
         elif self.phase == Phase.CAMERA:
             if self._elapsed() >= self.cam_to:
                 if self.quality_flag:
@@ -215,20 +219,20 @@ class StateNode(Node):
                 else:
                     self.get_logger().info('quality check OK.')
                 self._enter(Phase.ROLL_TRAY)
-                
+
         elif self.phase == Phase.ROLL_TRAY:
             if not self.roll_cli.service_is_ready():
                 self.get_logger().info('Waiting for /tray/roll ...')
                 return
-                
+
             req = RollTray.Request()
             req.distance_mm = self.roll_dist
             req.speed_mm_s  = self.roll_speed
             self.roll_cli.call_async(req)
-            
+
             # restart the cycle
-            self._publish_index(-1)     # back to HOME
-            self._step_idx = 0          # NEW: reset sequence
+            self._publish_index(-1)
+            self._step_idx = 0
             self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.IDLE:
@@ -238,11 +242,15 @@ class StateNode(Node):
     def _start_step(self, step_idx: int):
         idx = self.order[step_idx]
         self._publish_index(idx)
-        self._enter(Phase.STEP0 if step_idx == 0 else Phase.STEP1 if step_idx == 1 else Phase.STEP2)
+        self._enter(
+            Phase.STEP0 if step_idx == 0
+            else Phase.STEP1 if step_idx == 1
+            else Phase.STEP2
+        )
 
     def _run_step(self):
         """
-        CHANGED: Pump now follows RoboHand SWIRL phase:
+        Pump follows RoboHand SWIRL phase:
           - while /arm/swirl_active == True  -> pump ON
           - when it returns to False after having been True -> pump OFF and step complete
         """
@@ -274,14 +282,21 @@ class StateNode(Node):
 
         servo_neutral_deg = 90.0
         jt.position[3] = math.radians(servo_neutral_deg)
-        pump_msg = PumpCmd(); pump_msg.on = False; pump_msg.duty = 0.0; pump_msg.duration_s = 0.0
+
+        pump_msg = PumpCmd()
+        pump_msg.on = False
+        pump_msg.duty = 0.0
+        pump_msg.duration_s = 0.0
 
         amp_rad = math.radians(360.0)
         servo_low_deg, servo_high_deg = 0.0, 180.0
 
-        if   segment == 0: jt.position[0] = direction * amp_rad
-        elif segment == 1: jt.position[1] = direction * amp_rad
-        elif segment == 2: jt.position[2] = direction * amp_rad
+        if   segment == 0:
+            jt.position[0] = direction * amp_rad
+        elif segment == 1:
+            jt.position[1] = direction * amp_rad
+        elif segment == 2:
+            jt.position[2] = direction * amp_rad
         elif segment == 3:
             jt.position[3] = math.radians(servo_high_deg if direction > 0 else servo_low_deg)
         elif segment == 4:
