@@ -132,10 +132,6 @@ class RoboHandNode(Node):
     def _on_paused(self, msg: Bool):
         """Freeze arm control loop when ESP pause is active."""
         self.paused = bool(msg.data)
-        if self.paused:
-            self.get_logger().info("[ROBOHAND] PAUSED by ESP")
-        else:
-            self.get_logger().info("[ROBOHAND] RESUMED by ESP")
 
     # ------------- Phase selection -------------
     def _align_phase_with_index(self):
