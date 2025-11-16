@@ -10,6 +10,7 @@ from soes_msgs.msg import PumpCmd, JointTargets
 from std_msgs.msg import Bool
 
 STATUS_SWITCH_BIT = 0x01  # bit 0 in ESP32 status byte = switch ON/OFF
+STATUS_PAUSE_BIT  = 0x02  # bit 1 in ESP32 status byte = PAUSE
 
 
 class I2CBridge(Node):
@@ -43,9 +44,16 @@ class I2CBridge(Node):
         self.create_subscription(PumpCmd, '/pump/cmd', self.on_pump, qos)
         self.create_subscription(JointTargets, '/arm/joint_targets', self.on_joint, qos)
 
-        # Publisher for ESP status (ESP -> Jetson reads)
+        # Publisher for ESP switch status (ESP -> Jetson reads)
         self.switch_pub = self.create_publisher(Bool, '/esp_switch_on', 10)
         self.last_switch_state = None
+
+        # NEW: publisher for ESP pause state
+        self.pause_pub = self.create_publisher(Bool, '/esp_paused', 10)
+        self.last_pause_state = None
+
+        # Local pause flag to gate outgoing frames
+        self.paused = False
 
         # Timer to poll ESP status over I2C (e.g. 10 Hz)
         self.status_timer = self.create_timer(0.1, self.poll_status)
@@ -58,6 +66,12 @@ class I2CBridge(Node):
     #  Pump command (write-only)
     # -------------------------------------------------------------------------
     def on_pump(self, msg: PumpCmd):
+        # If hardware is paused, ignore pump commands
+        if self.paused:
+            if self.debug:
+                self.get_logger().debug('ESP paused -> skipping pump command')
+            return
+
         on_u8 = 1 if msg.on else 0
 
         frame = struct.pack('<BB', 0x10, on_u8)
@@ -70,6 +84,12 @@ class I2CBridge(Node):
     #  Joint command (write-only)
     # -------------------------------------------------------------------------
     def on_joint(self, msg: JointTargets):
+        # If hardware is paused, do not send new joint frames
+        if self.paused:
+            if self.debug:
+                self.get_logger().debug('ESP paused -> skipping joint frame')
+            return
+
         pos = [float(msg.position[i]) if i < len(msg.position) else 0.0
                for i in range(4)]
         vel = [float(msg.velocity[i]) if hasattr(msg, 'velocity') and i < len(msg.velocity)
@@ -117,8 +137,8 @@ class I2CBridge(Node):
     def poll_status(self):
         """
         Periodically called by a ROS2 timer.
-        Reads 1 byte from ESP32 (onRequestI2C), decodes switch state,
-        and publishes /esp_switch_on.
+        Reads 1 byte from ESP32 (onRequestI2C), decodes switch + pause state,
+        and publishes /esp_switch_on and /esp_paused.
         """
         try:
             status = self.bus.read_byte(self.addr)
@@ -126,15 +146,24 @@ class I2CBridge(Node):
             self.get_logger().warn(f'I2C read failed from 0x{self.addr:02X}: {e}')
             return
 
-        # Decode switch bit
+        # Decode bits
         switch_on = bool(status & STATUS_SWITCH_BIT)
+        pause_on  = bool(status & STATUS_PAUSE_BIT)
 
-        # Publish as Bool
-        msg = Bool()
-        msg.data = switch_on
-        self.switch_pub.publish(msg)
+        # Publish switch
+        sw_msg = Bool()
+        sw_msg.data = switch_on
+        self.switch_pub.publish(sw_msg)
 
-        # Edge detection: log only when state changes
+        # Publish pause
+        pa_msg = Bool()
+        pa_msg.data = pause_on
+        self.pause_pub.publish(pa_msg)
+
+        # Update local pause flag
+        self.paused = pause_on
+
+        # Edge-detection logging: switch
         if self.last_switch_state is None or switch_on != self.last_switch_state:
             if switch_on:
                 self.get_logger().warn(
@@ -142,8 +171,15 @@ class I2CBridge(Node):
                 )
             else:
                 self.get_logger().info('[ESP SWITCH] OFF')
-
             self.last_switch_state = switch_on
+
+        # Edge-detection logging: pause
+        if self.last_pause_state is None or pause_on != self.last_pause_state:
+            if pause_on:
+                self.get_logger().warn('[ESP PAUSE] PAUSED -> hardware frozen')
+            else:
+                self.get_logger().info('[ESP PAUSE] RESUMED -> hardware running')
+            self.last_pause_state = pause_on
 
 
 def main():
