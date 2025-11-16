@@ -91,7 +91,11 @@ class RoboHandNode(Node):
         self.center_sub  = self.create_subscription(CupcakeCenters, '/vision/centers', self._on_centers, qos)
         self.targets_pub = self.create_publisher(JointTargets, '/arm/joint_targets', 10)
         self.at_pub      = self.create_publisher(Bool, '/arm/at_target', 1)
-        self.swirl_pub   = self.create_publisher(Bool, '/arm/swirl_active', 1)   # NEW
+        self.swirl_pub   = self.create_publisher(Bool, '/arm/swirl_active', 1)   # already used by StateNode
+
+        # NEW: subscribe to /esp_paused to freeze this node too
+        self.paused = False
+        self.create_subscription(Bool, '/esp_paused', self._on_paused, 10)
 
         # -------- Runtime --------
         self.q: np.ndarray = np.zeros(4, dtype=float)
@@ -124,6 +128,14 @@ class RoboHandNode(Node):
         self.centers = [(p.x, p.y, p.z) for p in msg.centers]
         if len(self.centers) < 3:
             self.get_logger().warn("centers < 3; waiting for all three targets")
+
+    def _on_paused(self, msg: Bool):
+        """Freeze arm control loop when ESP pause is active."""
+        self.paused = bool(msg.data)
+        if self.paused:
+            self.get_logger().info("[ROBOHAND] PAUSED by ESP")
+        else:
+            self.get_logger().info("[ROBOHAND] RESUMED by ESP")
 
     # ------------- Phase selection -------------
     def _align_phase_with_index(self):
@@ -193,9 +205,9 @@ class RoboHandNode(Node):
     def _publish_at(self, is_at: bool):
         self.at_pub.publish(Bool(data=bool(is_at)))
 
-    def _publish_swirl(self, active: bool):          # NEW
-        """Tell StateNode whether we are in SWIRL phase or not."""  # NEW
-        self.swirl_pub.publish(Bool(data=bool(active)))            # NEW
+    def _publish_swirl(self, active: bool):
+        """Tell StateNode whether we are in SWIRL phase or not."""
+        self.swirl_pub.publish(Bool(data=bool(active)))
 
     def _home_step(self) -> bool:
         """Joint-space home control."""
@@ -258,16 +270,21 @@ class RoboHandNode(Node):
         self._enter(Phase.SWIRL, self.spiral_center.copy())
 
     def _tick(self):
+        # ======== GLOBAL PAUSE GATING ========
+        if self.paused:
+            # Do not update q, spiral_theta, or publish new commands while paused.
+            return
+
         # HOME
         if self.phase == Phase.HOME:
             self._home_step()
-            self._publish_swirl(False)   # NEW
+            self._publish_swirl(False)
             return
 
         # WAIT
         if self.phase == Phase.WAIT:
             self._publish_at(False)
-            self._publish_swirl(False)   # NEW
+            self._publish_swirl(False)
             return
 
         # MOVE
@@ -275,14 +292,14 @@ class RoboHandNode(Node):
             at = self._ik_step(self.des_xyz)
             if at:
                 self._start_swirl()
-            self._publish_swirl(False)   # NEW
+            self._publish_swirl(False)
             return
 
         # SWIRL
         if self.phase == Phase.SWIRL and self.spiral_center is not None:
             if self.theta_max <= 0.0:
                 self._enter(Phase.WAIT, None)
-                self._publish_swirl(False)   # NEW
+                self._publish_swirl(False)
                 return
 
             # Spiral pose
@@ -306,15 +323,15 @@ class RoboHandNode(Node):
                 label = f"pos{self.active_index + 1}" if self.active_index in (0,1,2) else "current position"
                 self.get_logger().info(f"[SWIRL] Swirl done at {label}")
                 self._enter(Phase.WAIT, None)
-                self._publish_swirl(False)   # NEW: SWIRL ended
+                self._publish_swirl(False)   # SWIRL ended
             else:
                 self.get_logger().debug("[SWIRL] Active")
-                self._publish_swirl(True)    # NEW: still swirling
+                self._publish_swirl(True)    # still swirling
             return
 
         # default
         self._publish_at(False)
-        self._publish_swirl(False)           # NEW
+        self._publish_swirl(False)
 
 
 def main():
