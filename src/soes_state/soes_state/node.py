@@ -73,9 +73,13 @@ class StateNode(Node):
         self.create_subscription(Bool, '/esp_switch_on', self._on_switch, 10)
 
         # NEW: subscribe to /arm/swirl_active to control pump
-        self.swirl_active = False                                  # NEW
-        self.create_subscription(Bool, '/arm/swirl_active',        # NEW
-                                 self._on_swirl, 10)              # NEW
+        self.swirl_active = False
+        self.create_subscription(Bool, '/arm/swirl_active', self._on_swirl, 10)
+
+        # NEW: subscribe to /esp_paused to globally pause state machine
+        self.paused = False
+        self.pause_start = None
+        self.create_subscription(Bool, '/esp_paused', self._on_paused, 10)
 
         # Pump helper
         self.pump = PumpController(self._pump_on, self._pump_off)
@@ -134,9 +138,31 @@ class StateNode(Node):
         """
         self.switch_on = bool(msg.data)
 
-    def _on_swirl(self, msg: Bool):      # NEW
-        """Track when RoboHand is in SWIRL phase."""  # NEW
-        self.swirl_active = bool(msg.data)           # NEW
+    def _on_swirl(self, msg: Bool):
+        """Track when RoboHand is in SWIRL phase."""
+        self.swirl_active = bool(msg.data)
+
+    def _on_paused(self, msg: Bool):
+        """
+        /esp_paused:
+          - True  -> freeze state machine (tick does nothing).
+          - False -> resume, adjusting timers so elapsed() ignores pause duration.
+        """
+        new_state = bool(msg.data)
+
+        # Entering pause
+        if new_state and not self.paused:
+            self.pause_start = self.get_clock().now()
+
+        # Leaving pause
+        elif not new_state and self.paused:
+            if self.pause_start is not None:
+                dt = self.get_clock().now() - self.pause_start
+                # Shift phase_t0 forward by pause duration so _elapsed() doesn't count it
+                self.phase_t0 = self.phase_t0 + dt
+                self.pause_start = None
+
+        self.paused = new_state
 
     # ---------- Callbacks ----------
     def on_quality(self, msg: VisionQuality):
@@ -144,6 +170,13 @@ class StateNode(Node):
 
     # ---------- Main tick ----------
     def tick(self):
+        # ======== GLOBAL PAUSE GATING ========
+        if self.paused:
+            # Do nothing while ESP pause button is active:
+            # - phase is kept
+            # - timers are adjusted on resume (see _on_paused)
+            return
+
         # ======== TEST_MOTOR ========
         if self.phase == Phase.TEST_MOTOR:
             self._test_motor_tick()
@@ -172,42 +205,41 @@ class StateNode(Node):
             if self.arm_at and self.arm_at_since is not None:
                 if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
 
-                    #NEW SEQUENCE LOGIC
+                    # NEW SEQUENCE LOGIC
                     if self._step_idx == 0:
-                        # self._step_idx = 0  # COMMENTED: no longer needed, already 0
                         self._start_step(0)
-                        
+
                     elif self._step_idx == 1:
                         self._start_step(1)
-                        
+
                     elif self._step_idx == 2:
                         self._start_step(2)
-                        
+
                     else:
                         # After STEP2 → INIT_POS → CAMERA
                         self._enter(Phase.CAMERA)
-                        
+
         elif self.phase == Phase.STEP0:
             if self._run_step():
-                self.get_logger().info("STEP0 complete → STEP1") #For checking
-                self._step_idx = 1 #NEXT is STEP1 after INIT_POS
+                self.get_logger().info("STEP0 complete → STEP1")  # For checking
+                self._step_idx = 1  # NEXT is STEP1 after INIT_POS
                 self._publish_index(-1)
                 self._enter(Phase.INIT_POS)
-                
+
         elif self.phase == Phase.STEP1:
             if self._run_step():
                 self.get_logger().info("STEP1 complete → STEP2")
                 self._step_idx = 2
                 self._publish_index(-1)
                 self._enter(Phase.INIT_POS)
-                
+
         elif self.phase == Phase.STEP2:
             if self._run_step():
                 self.get_logger().info("STEP2 complete → CAMERA")
-                self._step_idx = 3 #Do we need this or not ya? I feel like gaperlu but incase aja
+                self._step_idx = 3  # may or may not be used later
                 self._publish_index(-1)
                 self._enter(Phase.INIT_POS)
-                
+
         elif self.phase == Phase.CAMERA:
             if self._elapsed() >= self.cam_to:
                 if self.quality_flag:
@@ -215,20 +247,20 @@ class StateNode(Node):
                 else:
                     self.get_logger().info('quality check OK.')
                 self._enter(Phase.ROLL_TRAY)
-                
+
         elif self.phase == Phase.ROLL_TRAY:
             if not self.roll_cli.service_is_ready():
                 self.get_logger().info('Waiting for /tray/roll ...')
                 return
-                
+
             req = RollTray.Request()
             req.distance_mm = self.roll_dist
             req.speed_mm_s  = self.roll_speed
             self.roll_cli.call_async(req)
-            
+
             # restart the cycle
             self._publish_index(-1)     # back to HOME
-            self._step_idx = 0          # NEW: reset sequence
+            self._step_idx = 0          # reset sequence
             self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.IDLE:
@@ -242,7 +274,7 @@ class StateNode(Node):
 
     def _run_step(self):
         """
-        CHANGED: Pump now follows RoboHand SWIRL phase:
+        Pump now follows RoboHand SWIRL phase:
           - while /arm/swirl_active == True  -> pump ON
           - when it returns to False after having been True -> pump OFF and step complete
         """
@@ -256,7 +288,7 @@ class StateNode(Node):
             if self._did_start_pump:
                 self.pump.stop()
                 self._did_start_pump = False
-                self.get_logger().info('Pump OFF (SWIRL complete)')
+                self.get_logger()..info('Pump OFF (SWIRL complete)')
                 return True
             return False
 
@@ -334,7 +366,6 @@ class StateNode(Node):
         # Publish commands
         self.pump_pub.publish(pump_msg)
         self.arm_pub.publish(jt)
-
 
 
 def main():
