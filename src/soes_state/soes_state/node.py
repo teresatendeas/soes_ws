@@ -288,7 +288,7 @@ class StateNode(Node):
             if self._did_start_pump:
                 self.pump.stop()
                 self._did_start_pump = False
-                self.get_logger()..info('Pump OFF (SWIRL complete)')
+                self.get_logger().info('Pump OFF (SWIRL complete)')
                 return True
             return False
 
