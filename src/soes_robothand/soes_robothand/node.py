@@ -59,10 +59,9 @@ class RoboHandNode(Node):
         self.declare_parameter('omega', 0.5)  # rad/s
 
         # -------- NEW: far-move slow mode --------
-        # when Cartesian distance to target >= far_distance_m, or home joint error >= far_home_err_rad,
-        # we scale down the joint velocity limits.
+        # when Cartesian distance to target >= far_distance_m we scale down joint velocity limits.
         self.declare_parameter('far_distance_m', 0.15)      # "far" threshold in Cartesian space
-        self.declare_parameter('far_home_err_rad', 1.0)     # "far" threshold for homing (joint-norm)
+        self.declare_parameter('far_home_err_rad', 1.0)     # kept for YAML compatibility (not used directly)
         self.declare_parameter('far_speed_scale', 0.4)      # 0 < scale <= 1, e.g. 0.4 => 40% of normal speed
 
         # -------- Load parameters --------
@@ -94,9 +93,9 @@ class RoboHandNode(Node):
 
         # --- load far/slow params ---
         self.far_distance_m   = float(self.get_parameter('far_distance_m').value)
-        self.far_home_err_rad = float(self.get_parameter('far_home_err_rad').value)
+        self.far_home_err_rad = float(self.get_parameter('far_home_err_rad').value)  # not used directly
         self.far_speed_scale  = float(self.get_parameter('far_speed_scale').value)
-        # precomputed slow joint limits
+        # precomputed slow joint limits (used for far moves AND HOME)
         self.qdot_lim_slow    = self.far_speed_scale * self.qdot_lim
 
         # -------- ROS I/O --------
@@ -220,15 +219,12 @@ class RoboHandNode(Node):
         self.swirl_pub.publish(Bool(data=bool(active)))
 
     def _home_step(self) -> bool:
-        """Joint-space home control, with slower motion when far from home."""
+        """Joint-space home control, with always-slow motion for safety."""
         err = self.q_home - self.q
         err_norm = float(np.linalg.norm(err))
 
-        # choose joint velocity limits: slow when far from home
-        if err_norm >= self.far_home_err_rad:
-            qdot_lim = self.qdot_lim_slow
-        else:
-            qdot_lim = self.qdot_lim
+        # ALWAYS use slow joint limits when homing
+        qdot_lim = self.qdot_lim_slow
 
         qdot = self.kp_joint * err
         qdot = np.clip(qdot, -qdot_lim, qdot_lim)
