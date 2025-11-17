@@ -63,11 +63,11 @@ class RoboHandNode(Node):
         # when Cartesian distance to target >= far_distance_m we scale down joint velocity limits.
         self.declare_parameter('far_distance_m', 0.15)      # "far" threshold in Cartesian space
         self.declare_parameter('far_home_err_rad', 1.0)     # kept for YAML compatibility (not used directly)
-        self.declare_parameter('far_speed_scale', 0.4)      # 0 < scale <= 1, e.g. 0.4 => 40% of normal speed
+        self.declare_parameter('far_speed_scale', 0.7)      # 0 < scale <= 1, e.g. 0.7 => 70% of normal speed
 
         # -------- simple velocity smoothing --------
         # 0 < vel_smooth_alpha <= 1; smaller = smoother (and slower response)
-        self.declare_parameter('vel_smooth_alpha', 0.25)
+        self.declare_parameter('vel_smooth_alpha', 0.35)
 
         # -------- Load parameters --------
         self.rate_hz  = float(self.get_parameter('rate_hz').value)
@@ -263,10 +263,10 @@ class RoboHandNode(Node):
         qdot_lim = self.qdot_lim_slow
 
         qdot_raw = self.kp_joint * err
+        # clip, smooth, clip again to enforce limits after smoothing
         qdot_raw = np.clip(qdot_raw, -qdot_lim, qdot_lim)
-
-        # smooth velocity so HOME transitions are curved
         qdot = self._smooth_qdot(qdot_raw)
+        qdot = np.clip(qdot, -qdot_lim, qdot_lim)
 
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
 
@@ -307,12 +307,18 @@ class RoboHandNode(Node):
         else:
             qdot_lim = self.qdot_lim
 
+        # clip, smooth, then clip again to enforce limits after smoothing
+        qdot = np.clip(qdot, -qdot_lim, qdot_lim)
+        qdot = self._smooth_qdot(qdot)
         qdot = np.clip(qdot, -qdot_lim, qdot_lim)
 
-        # smooth velocities so MOVE / MOVE_BACK / SWIRL transitions are rounded
-        qdot = self._smooth_qdot(qdot)
-
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
+
+        # optional debug: check joint limits
+        if np.any(np.isclose(self.q, self.q_min, atol=1e-3)) or np.any(np.isclose(self.q, self.q_max, atol=1e-3)):
+            self.get_logger().debug(
+                f"[IK] q near limits: q={self.q}, q_min={self.q_min}, q_max={self.q_max}"
+            )
 
         self._publish_targets(self.q, qdot, use_velocity=True)
 
@@ -351,6 +357,8 @@ class RoboHandNode(Node):
 
         # WAIT
         if self.phase == Phase.WAIT:
+            # IMPORTANT: send a "hold" command so ESP stops any previous velocity motion
+            self._publish_targets(self.q, np.zeros(4), use_velocity=False)
             self._publish_at(False)
             self._publish_swirl(False)
             return
@@ -386,6 +394,20 @@ class RoboHandNode(Node):
             dy = r * math.sin(self.spiral_theta)
             dz = self.s * self.spiral_theta   # linear height with theta
             des = self.spiral_center + np.array([dx, dy, dz])
+
+            # --- reachability / stuck guard ---
+            cur_xyz = self.fk_xyz(self.q)
+            dist = float(np.linalg.norm(des - cur_xyz))
+            MAX_SWIRL_DIST = 0.06  # tune based on your workspace
+
+            if dist > MAX_SWIRL_DIST:
+                self.get_logger().warn(
+                    f"[SWIRL] dist={dist:.3f} m > MAX_SWIRL_DIST, stopping swirl early"
+                )
+                self.just_finished_swirl = True
+                self._enter(Phase.WAIT, None)
+                self._publish_swirl(False)
+                return
 
             # Spiral feedforward (helps tracking)
             rdot = self.R0 * self.alpha * self.omega
