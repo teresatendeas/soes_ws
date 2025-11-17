@@ -14,17 +14,18 @@ from soes_msgs.msg import JointTargets, CupcakeCenters
 
 # ---------------- Phases ----------------
 class Phase(enum.Enum):
-    HOME  = 0    # joint-space home (index = -1)
-    WAIT  = 1    # idle until /state/active_index changes
-    MOVE  = 2    # go to center i (Cartesian target)
-    SWIRL = 3    # generate spiral about center i
+    HOME     = 0    # joint-space home (index = -1)
+    WAIT     = 1    # idle until /state/active_index changes
+    MOVE     = 2    # go to center i (Cartesian target)
+    SWIRL    = 3    # generate spiral about center i
+    APPROACH = 4    # NEW: smooth approach from center to spiral start
 
 
 class RoboHandNode(Node):
     """
     4-DOF arm: q = [q1 (yaw), q2, q3, q4] with analytic FK/J.
     - index = -1 -> HOME (drive joints to q_home_rad)
-    - index in {0,1,2} -> MOVE to centers[i], then SWIRL a spiral about that center
+    - index in {0,1,2} -> MOVE to centers[i], then APPROACH, then SWIRL about that center
     - Publishes /arm/at_target (Bool) when within tolerance (HOME/MOVE/SWIRL)
     """
     def __init__(self):
@@ -58,6 +59,9 @@ class RoboHandNode(Node):
         self.declare_parameter('height', 0.04)
         self.declare_parameter('omega', 0.5)  # rad/s
 
+        # NEW: approach duration before entering spiral
+        self.declare_parameter('approach_duration_s', 3.0)  # ~60 steps at 20 Hz
+
         # -------- Load parameters --------
         self.rate_hz  = float(self.get_parameter('rate_hz').value)
         self.dt       = 1.0 / self.rate_hz
@@ -85,6 +89,9 @@ class RoboHandNode(Node):
         self.theta_max = 2.0 * math.pi * self.turns
         self.s = (self.height / self.theta_max) if self.theta_max != 0.0 else 0.0
 
+        # NEW: approach duration (seconds)
+        self.approach_duration_s = float(self.get_parameter('approach_duration_s').value)
+
         # -------- ROS I/O --------
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST)
         self.index_sub   = self.create_subscription(Int32, '/state/active_index', self._on_index, 10)
@@ -111,11 +118,16 @@ class RoboHandNode(Node):
         self.spiral_theta = 0.0
         self.spiral_center: Optional[np.ndarray] = None
 
+        # NEW: approach bookkeeping
+        self.approach_start_xyz: Optional[np.ndarray] = None
+        self.approach_end_xyz: Optional[np.ndarray] = None
+        self.approach_tau: float = 0.0
+
         # Logging helpers
         self._home_done_logged = False  # ensure "arrived HOME" logged once
 
         self.timer = self.create_timer(self.dt, self._tick)
-        self.get_logger().info('soes_robothand: HOME first, then MOVE/SWIRL on index.')
+        self.get_logger().info('soes_robothand: HOME first, then MOVE/APPROACH/SWIRL on index.')
 
     # ------------- Callbacks -------------
     def _on_index(self, msg: Int32):
@@ -223,7 +235,14 @@ class RoboHandNode(Node):
 
         return at
 
-    def _ik_step(self, des_xyz: np.ndarray, xdot_ff: Optional[np.ndarray] = None) -> bool:
+    def _ik_step(self, des_xyz: np.ndarray,
+                 xdot_ff: Optional[np.ndarray] = None,
+                 update_at: bool = True) -> bool:
+        """
+        Differential IK step with optional feedforward.
+        update_at=False is used during the APPROACH phase so that /arm/at_target
+        does not confuse StateNode.
+        """
         cur_xyz = self.fk_xyz(self.q)
         err = des_xyz - cur_xyz
         if np.linalg.norm(err) <= self.pos_tol:
@@ -249,21 +268,42 @@ class RoboHandNode(Node):
             (self.get_clock().now() - self.last_within_tol) >= Duration(seconds=self.settle_s)
         )
 
-        self._publish_at(at)
+        if update_at:
+            self._publish_at(at)
         return at
 
     # ------------- Phase logic -------------
     def _start_swirl(self):
-        # prepare spiral about current center
+        """
+        Prepare spiral about current center.
+        Now includes a smooth APPROACH from the center position to the
+        first spiral point to avoid velocity spikes.
+        """
         if self.centers is None or self.active_index not in (0,1,2):
             return
 
         label = f"pos{self.active_index + 1}"
-        self.get_logger().info(f"[ROBOHAND] Arrived at {label}, starting swirl")
+        self.get_logger().info(f"[ROBOHAND] Arrived at {label}, starting approach to swirl")
 
+        # Spiral center and initial theta
         self.spiral_center = np.array(self.centers[self.active_index], dtype=float)
         self.spiral_theta = 0.0
-        self._enter(Phase.SWIRL, self.spiral_center.copy())
+
+        # First point of the spiral (theta = 0)
+        # In your Python spiral: dx = R0*cos(theta), dy = R0*sin(theta)
+        # so for theta=0 -> [R0, 0, 0] offset in world frame.
+        spiral_start = self.spiral_center + np.array([self.R0, 0.0, 0.0])
+
+        # Current EE position (at the end of MOVE, near the center)
+        current_xyz = self.fk_xyz(self.q)
+
+        # Setup linear interpolation current_xyz -> spiral_start
+        self.approach_start_xyz = current_xyz
+        self.approach_end_xyz   = spiral_start
+        self.approach_tau       = 0.0
+
+        # Enter APPROACH phase (des_xyz used only for logging/debug)
+        self._enter(Phase.APPROACH, spiral_start)
 
     def _tick(self):
         # ======== GLOBAL PAUSE GATING ========
@@ -289,6 +329,34 @@ class RoboHandNode(Node):
             if at:
                 self._start_swirl()
             self._publish_swirl(False)
+            return
+
+        # NEW: APPROACH to spiral start (position-only IK, no feedforward)
+        if self.phase == Phase.APPROACH and \
+           self.approach_start_xyz is not None and \
+           self.approach_end_xyz is not None:
+
+            # progress 0 -> 1 over approach_duration_s
+            if self.approach_duration_s <= 0.0:
+                self.approach_tau = 1.0
+            else:
+                self.approach_tau = min(
+                    1.0,
+                    self.approach_tau + self.dt / self.approach_duration_s
+                )
+
+            des = (1.0 - self.approach_tau) * self.approach_start_xyz + \
+                  self.approach_tau * self.approach_end_xyz
+
+            # Use IK without feedforward and without updating /arm/at_target
+            self._ik_step(des, xdot_ff=None, update_at=False)
+            self._publish_swirl(False)
+
+            # When finished, switch to SWIRL phase (theta=0, at spiral_start)
+            if self.approach_tau >= 1.0:
+                self.get_logger().info("[ROBOHAND] Approach to spiral start complete, entering SWIRL")
+                # des_xyz for SWIRL is just for logging; spiral_center is already set
+                self._enter(Phase.SWIRL, self.spiral_center.copy())
             return
 
         # SWIRL
