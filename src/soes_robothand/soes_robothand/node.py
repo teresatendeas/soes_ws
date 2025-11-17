@@ -47,7 +47,7 @@ class RoboHandNode(Node):
 
         # -------- HOME (joint space) --------
         self.declare_parameter('q_home_rad', [0.0, 0.0, 0.0, 0.0])  # set this to a safe ready pose
-        self.declare_parameter('kp_joint', 3.0)                     # joint homing gain
+        self.declare_parameter('kp_joint', 3.0)                     # joint homing gain (kept for compat)
         self.declare_parameter('home_tol_rad', 0.02)                # ~1.1°
 
         # -------- Spiral parameters --------
@@ -105,6 +105,9 @@ class RoboHandNode(Node):
         # NEW: smoothing coefficient & previous velocity
         self.vel_alpha = float(self.get_parameter('vel_smooth_alpha').value)
         self.qdot_prev = np.zeros(4, dtype=float)
+
+        # NEW: Cartesian pose corresponding to HOME joint config
+        self.home_xyz = self.fk_xyz(self.q_home)
 
         # -------- ROS I/O --------
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST)
@@ -240,34 +243,41 @@ class RoboHandNode(Node):
         return self.qdot_prev
 
     def _home_step(self) -> bool:
-        """Joint-space home control, with always-slow motion for safety."""
+        """
+        HOME using the same IK + velocity smoothing path as MOVE, so it feels
+        just as smooth. Target is the Cartesian position of q_home.
+        We also enforce slow joint limits via force_slow=True.
+        """
+        # Use same IK pipeline as MOVE, but targeting home_xyz and forcing slow limits
+        at_cart = self._ik_step(self.home_xyz, xdot_ff=None, force_slow=True)
+
+        # Additionally check that joints are close to the desired home configuration
         err = self.q_home - self.q
         err_norm = float(np.linalg.norm(err))
+        at_joint = (err_norm <= self.home_tol)
 
-        # ALWAYS use slow joint limits when homing
-        qdot_lim = self.qdot_lim_slow
+        # Only say "at HOME" if both Cartesian and joint-space are ok
+        at = at_cart and at_joint
 
-        qdot_raw = self.kp_joint * err
-        qdot_raw = np.clip(qdot_raw, -qdot_lim, qdot_lim)
-
-        # NEW: smooth velocity so HOME transitions are curved
-        qdot = self._smooth_qdot(qdot_raw)
-
-        self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
-
-        # use_velocity=False -> ESP ignores velocity field
-        self._publish_targets(self.q, np.zeros(4), use_velocity=False)
-        at = float(err_norm) <= self.home_tol
+        # Override /arm/at_target to reflect true home condition
         self._publish_at(at)
 
         # Log once when HOME reached
         if at and not self._home_done_logged:
-            self.get_logger().info("[ROBOHAND] Arrived at init pos (HOME)")
+            self.get_logger().info("[ROBOHAND] Arrived at init pos (HOME, IK-based)")
             self._home_done_logged = True
 
         return at
 
-    def _ik_step(self, des_xyz: np.ndarray, xdot_ff: Optional[np.ndarray] = None) -> bool:
+    def _ik_step(
+        self,
+        des_xyz: np.ndarray,
+        xdot_ff: Optional[np.ndarray] = None,
+        force_slow: bool = False
+    ) -> bool:
+        """
+        Cartesian IK step used by MOVE, SWIRL, and HOME (when force_slow=True).
+        """
         cur_xyz = self.fk_xyz(self.q)
         err = des_xyz - cur_xyz
         dist = float(np.linalg.norm(err))
@@ -286,19 +296,24 @@ class RoboHandNode(Node):
         JJt = J @ J.T
         qdot = J.T @ np.linalg.solve(JJt + (self.lmbda**2) * np.eye(3), v)
 
-        # choose joint velocity limits: slow when "far" in Cartesian space
-        if dist >= self.far_distance_m:
+        # choose joint velocity limits:
+        # - if force_slow: always use slow limits (for HOME)
+        # - else: use slow when "far" in Cartesian space
+        if force_slow:
+            qdot_lim = self.qdot_lim_slow
+        elif dist >= self.far_distance_m:
             qdot_lim = self.qdot_lim_slow
         else:
             qdot_lim = self.qdot_lim
 
         qdot = np.clip(qdot, -qdot_lim, qdot_lim)
 
-        # NEW: smooth velocities so MOVE <-> SWIRL <-> HOME transitions are rounded
+        # NEW: smooth velocities so transitions are rounded
         qdot = self._smooth_qdot(qdot)
 
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
 
+        # IK path always uses velocity mode on ESP
         self._publish_targets(self.q, qdot, use_velocity=True)
 
         at = (
@@ -306,6 +321,7 @@ class RoboHandNode(Node):
             (self.get_clock().now() - self.last_within_tol) >= Duration(seconds=self.settle_s)
         )
 
+        # Publish "at" here for MOVE/SWIRL; HOME overrides with extra joint check
         self._publish_at(at)
         return at
 
