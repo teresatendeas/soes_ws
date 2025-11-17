@@ -64,9 +64,9 @@ class RoboHandNode(Node):
         self.declare_parameter('far_home_err_rad', 1.0)     # kept for YAML compatibility (not used directly)
         self.declare_parameter('far_speed_scale', 0.4)      # 0 < scale <= 1, e.g. 0.4 => 40% of normal speed
 
-        # -------- NEW: acceleration (jerk) limiting --------
-        # Max allowed joint acceleration (rad/s^2) for smoothing phase transitions
-        self.declare_parameter('max_accel_rad_s2', [5.0, 5.0, 5.0, 5.0])
+        # -------- NEW: simple velocity smoothing --------
+        # 0 < vel_smooth_alpha <= 1; smaller = smoother (and slower response)
+        self.declare_parameter('vel_smooth_alpha', 0.25)
 
         # -------- Load parameters --------
         self.rate_hz  = float(self.get_parameter('rate_hz').value)
@@ -102,8 +102,9 @@ class RoboHandNode(Node):
         # precomputed slow joint limits (used for far moves AND HOME)
         self.qdot_lim_slow    = self.far_speed_scale * self.qdot_lim
 
-        # --- NEW: load acceleration limits ---
-        self.max_accel = np.array(self.get_parameter('max_accel_rad_s2').value, dtype=float)
+        # NEW: smoothing coefficient & previous velocity
+        self.vel_alpha = float(self.get_parameter('vel_smooth_alpha').value)
+        self.qdot_prev = np.zeros(4, dtype=float)
 
         # -------- ROS I/O --------
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST)
@@ -133,9 +134,6 @@ class RoboHandNode(Node):
 
         # Logging helpers
         self._home_done_logged = False  # ensure "arrived HOME" logged once
-
-        # NEW: previous joint velocity for accel limiting
-        self.qdot_prev = np.zeros(4, dtype=float)
 
         self.timer = self.create_timer(self.dt, self._tick)
         self.get_logger().info('soes_robothand: HOME first, then MOVE/SWIRL on index.')
@@ -180,7 +178,7 @@ class RoboHandNode(Node):
         if new_phase == Phase.HOME:
             self._home_done_logged = False
 
-        # NEW: reset velocity history so next motion ramps up smoothly
+        # NEW: reset smoothed velocity so transitions ramp from rest
         self.qdot_prev[:] = 0.0
 
         self.get_logger().info(f"[ROBOHAND] -> {self.phase.name} des={self.des_xyz if xyz is not None else None}")
@@ -231,25 +229,15 @@ class RoboHandNode(Node):
         """Tell StateNode whether we are in SWIRL phase or not."""
         self.swirl_pub.publish(Bool(data=bool(active)))
 
-    # NEW: velocity + acceleration limiting in one place
-    def _apply_dyn_limits(self, qdot_cmd: np.ndarray, qdot_lim: np.ndarray) -> np.ndarray:
+    # NEW: first-order low-pass filter on joint velocities
+    def _smooth_qdot(self, qdot_cmd: np.ndarray) -> np.ndarray:
         """
-        1) Clip velocity to |qdot| <= qdot_lim.
-        2) Clip acceleration: |qdot - qdot_prev| <= max_accel * dt.
+        Smooth velocity changes:
+          qdot_smoothed = (1 - alpha)*qdot_prev + alpha*qdot_cmd
         """
-        # velocity limit
-        qdot_cmd = np.clip(qdot_cmd, -qdot_lim, qdot_lim)
-
-        # acceleration limit
-        max_dqdot = self.max_accel * self.dt
-        dqdot = qdot_cmd - self.qdot_prev
-        dqdot_clipped = np.clip(dqdot, -max_dqdot, max_dqdot)
-
-        qdot_out = self.qdot_prev + dqdot_clipped
-        qdot_out = np.clip(qdot_out, -qdot_lim, qdot_lim)
-
-        self.qdot_prev = qdot_out.copy()
-        return qdot_out
+        alpha = self.vel_alpha
+        self.qdot_prev = (1.0 - alpha) * self.qdot_prev + alpha * qdot_cmd
+        return self.qdot_prev
 
     def _home_step(self) -> bool:
         """Joint-space home control, with always-slow motion for safety."""
@@ -257,11 +245,17 @@ class RoboHandNode(Node):
         err_norm = float(np.linalg.norm(err))
 
         # ALWAYS use slow joint limits when homing
+        qdot_lim = self.qdot_lim_slow
+
         qdot_raw = self.kp_joint * err
-        qdot = self._apply_dyn_limits(qdot_raw, self.qdot_lim_slow)
+        qdot_raw = np.clip(qdot_raw, -qdot_lim, qdot_lim)
+
+        # NEW: smooth velocity so HOME transitions are curved
+        qdot = self._smooth_qdot(qdot_raw)
 
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
 
+        # use_velocity=False -> ESP ignores velocity field
         self._publish_targets(self.q, np.zeros(4), use_velocity=False)
         at = float(err_norm) <= self.home_tol
         self._publish_at(at)
@@ -298,8 +292,10 @@ class RoboHandNode(Node):
         else:
             qdot_lim = self.qdot_lim
 
-        # NEW: apply velocity + acceleration limits
-        qdot = self._apply_dyn_limits(qdot, qdot_lim)
+        qdot = np.clip(qdot, -qdot_lim, qdot_lim)
+
+        # NEW: smooth velocities so MOVE <-> SWIRL <-> HOME transitions are rounded
+        qdot = self._smooth_qdot(qdot)
 
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
 
