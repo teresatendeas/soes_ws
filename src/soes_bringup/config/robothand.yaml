@@ -8,7 +8,7 @@ soes_robothand:
 
     kp_cart: 1.0
     damping_lambda: 0.1
-    qdot_limit_rad_s: [3.0, 3.0, 3.0, 3.0]
+    qdot_limit_rad_s: [4.0, 4.0, 4.0, 4.0]
 
     q_min_rad: [-314.16, -157.08, -157.08, -1.5708]
     q_max_rad: [ 314.16,  157.08,  157.08,  1.5708]
@@ -31,4 +31,4 @@ soes_robothand:
     far_speed_scale: 0.7
 
     # Smoothing factor for velocity transitions
-    vel_smooth_alpha: 0.25
+    vel_smooth_alpha: 0.35
