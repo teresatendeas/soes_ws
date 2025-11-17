@@ -23,7 +23,7 @@ class Phase(enum.Enum):
 class RoboHandNode(Node):
     """
     4-DOF arm: q = [q1 (yaw), q2, q3, q4] with analytic FK/J.
-    - index = -1 -> HOME (drive joints to q_home_rad)
+    - index = -1 -> HOME (drive to FK(q_home_rad) using IK controller)
     - index in {0,1,2} -> MOVE to centers[i], then SWIRL a spiral about that center
     - Publishes /arm/at_target (Bool) when within tolerance (HOME/MOVE/SWIRL)
     """
@@ -45,10 +45,10 @@ class RoboHandNode(Node):
         self.declare_parameter('q_min_rad', [-math.pi, -math.pi/2, -math.pi/2, -math.pi/2])
         self.declare_parameter('q_max_rad', [ math.pi,  math.pi/2,  math.pi/2,  math.pi/2])
 
-        # -------- HOME (joint space) --------
-        self.declare_parameter('q_home_rad', [0.0, 0.0, 0.0, 0.0])  # set this to a safe ready pose
-        self.declare_parameter('kp_joint', 3.0)                     # joint homing gain
-        self.declare_parameter('home_tol_rad', 0.02)                # ~1.1°
+        # -------- HOME (joint space definition, but motion now via IK) --------
+        self.declare_parameter('q_home_rad', [0.0, 0.0, 0.0, 0.0])  # safe ready pose in joint space
+        self.declare_parameter('kp_joint', 3.0)                     # kept for compatibility (unused now)
+        self.declare_parameter('home_tol_rad', 0.02)                # kept for compatibility (unused now)
 
         # -------- Spiral parameters --------
         # r(θ) = R0 * (1 + α θ), z(θ) = (height / θ_max) * θ,  θ̇ = ω
@@ -84,8 +84,8 @@ class RoboHandNode(Node):
         self.q_max    = np.array(self.get_parameter('q_max_rad').value, dtype=float)
 
         self.q_home   = np.array(self.get_parameter('q_home_rad').value, dtype=float)
-        self.kp_joint = float(self.get_parameter('kp_joint').value)
-        self.home_tol = float(self.get_parameter('home_tol_rad').value)
+        self.kp_joint = float(self.get_parameter('kp_joint').value)      # unused
+        self.home_tol = float(self.get_parameter('home_tol_rad').value) # unused
 
         self.R0     = float(self.get_parameter('R0').value)
         self.turns  = int(self.get_parameter('turns').value)
@@ -99,7 +99,7 @@ class RoboHandNode(Node):
         self.far_distance_m   = float(self.get_parameter('far_distance_m').value)
         self.far_home_err_rad = float(self.get_parameter('far_home_err_rad').value)  # not used directly
         self.far_speed_scale  = float(self.get_parameter('far_speed_scale').value)
-        # precomputed slow joint limits (used for far moves AND HOME)
+        # precomputed slow joint limits (used for far moves and optionally HOME)
         self.qdot_lim_slow    = self.far_speed_scale * self.qdot_lim
 
         # NEW: smoothing coefficient & previous velocity
@@ -172,16 +172,18 @@ class RoboHandNode(Node):
         self.phase = new_phase
         self.phase_t0 = self.get_clock().now()
         self.last_within_tol = None
-        self.des_xyz = xyz.copy() if xyz is not None else None
 
-        # Reset HOME arrival logging when entering HOME
+        # For HOME, we define a Cartesian target as FK(q_home)
         if new_phase == Phase.HOME:
+            self.des_xyz = self.fk_xyz(self.q_home)
             self._home_done_logged = False
+        else:
+            self.des_xyz = xyz.copy() if xyz is not None else None
 
         # NEW: reset smoothed velocity so transitions ramp from rest
         self.qdot_prev[:] = 0.0
 
-        self.get_logger().info(f"[ROBOHAND] -> {self.phase.name} des={self.des_xyz if xyz is not None else None}")
+        self.get_logger().info(f"[ROBOHAND] -> {self.phase.name} des={self.des_xyz}")
 
     def _elapsed(self) -> float:
         return (self.get_clock().now() - self.phase_t0).nanoseconds * 1e-9
@@ -238,34 +240,6 @@ class RoboHandNode(Node):
         alpha = self.vel_alpha
         self.qdot_prev = (1.0 - alpha) * self.qdot_prev + alpha * qdot_cmd
         return self.qdot_prev
-
-    def _home_step(self) -> bool:
-        """Joint-space home control, with always-slow motion for safety."""
-        err = self.q_home - self.q
-        err_norm = float(np.linalg.norm(err))
-
-        # ALWAYS use slow joint limits when homing
-        qdot_lim = self.qdot_lim_slow
-
-        qdot_raw = self.kp_joint * err
-        qdot_raw = np.clip(qdot_raw, -qdot_lim, qdot_lim)
-
-        # NEW: smooth velocity so HOME transitions are curved
-        qdot = self._smooth_qdot(qdot_raw)
-
-        self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
-
-        # use_velocity=False -> ESP ignores velocity field
-        self._publish_targets(self.q, np.zeros(4), use_velocity=False)
-        at = float(err_norm) <= self.home_tol
-        self._publish_at(at)
-
-        # Log once when HOME reached
-        if at and not self._home_done_logged:
-            self.get_logger().info("[ROBOHAND] Arrived at init pos (HOME)")
-            self._home_done_logged = True
-
-        return at
 
     def _ik_step(self, des_xyz: np.ndarray, xdot_ff: Optional[np.ndarray] = None) -> bool:
         cur_xyz = self.fk_xyz(self.q)
@@ -328,9 +302,12 @@ class RoboHandNode(Node):
             # Do not update q, spiral_theta, or publish new commands while paused.
             return
 
-        # HOME
-        if self.phase == Phase.HOME:
-            self._home_step()
+        # HOME (now uses IK toward FK(q_home))
+        if self.phase == Phase.HOME and self.des_xyz is not None:
+            at = self._ik_step(self.des_xyz)
+            if at and not self._home_done_logged:
+                self.get_logger().info("[ROBOHAND] Arrived at init pos (HOME)")
+                self._home_done_logged = True
             self._publish_swirl(False)
             return
 
