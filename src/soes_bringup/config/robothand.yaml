@@ -6,7 +6,7 @@ soes_robothand:
 
     link_lengths_m: [0.00, 0.14, 0.12, 0.04]
 
-    kp_cart: 3.0
+    kp_cart: 1.0
     damping_lambda: 0.1
     qdot_limit_rad_s: [3.0, 3.0, 3.0, 3.0]
 
@@ -21,6 +21,6 @@ soes_robothand:
     turns: 3
     alpha: -0.03
     height: 0.04
-    omega: 3.0
+    omega: 2.0
 
-    approach_duration_s: 3.0
+    approach_duration_s: 1.5
