@@ -17,16 +17,15 @@ class Phase(enum.Enum):
     HOME  = 0    # joint-space home (index = -1)
     WAIT  = 1    # idle until /state/active_index changes
     MOVE  = 2    # go to center i (Cartesian target)
-    APPROACH = 3 # follow approach waypoints before starting swirl
-    SWIRL = 4    # generate spiral about center i
+    SWIRL = 3    # generate spiral about center i
 
 
 class RoboHandNode(Node):
     """
     4-DOF arm: q = [q1 (yaw), q2, q3, q4] with analytic FK/J.
     - index = -1 -> HOME (drive joints to q_home_rad)
-    - index in {0,1,2} -> MOVE to centers[i], then APPROACH then SWIRL a spiral about that center
-    - Publishes /arm/at_target (Bool) when within tolerance (HOME/MOVE/APPROACH/SWIRL)
+    - index in {0,1,2} -> MOVE to centers[i], then SWIRL a spiral about that center
+    - Publishes /arm/at_target (Bool) when within tolerance (HOME/MOVE/SWIRL)
     """
     def __init__(self):
         super().__init__('soes_robothand')
@@ -59,6 +58,13 @@ class RoboHandNode(Node):
         self.declare_parameter('height', 0.04)
         self.declare_parameter('omega', 0.5)  # rad/s
 
+        # -------- NEW: far-move slow mode --------
+        # when Cartesian distance to target >= far_distance_m, or home joint error >= far_home_err_rad,
+        # we scale down the joint velocity limits.
+        self.declare_parameter('far_distance_m', 0.15)      # "far" threshold in Cartesian space
+        self.declare_parameter('far_home_err_rad', 1.0)     # "far" threshold for homing (joint-norm)
+        self.declare_parameter('far_speed_scale', 0.4)      # 0 < scale <= 1, e.g. 0.4 => 40% of normal speed
+
         # -------- Load parameters --------
         self.rate_hz  = float(self.get_parameter('rate_hz').value)
         self.dt       = 1.0 / self.rate_hz
@@ -86,6 +92,13 @@ class RoboHandNode(Node):
         self.theta_max = 2.0 * math.pi * self.turns
         self.s = (self.height / self.theta_max) if self.theta_max != 0.0 else 0.0
 
+        # --- load far/slow params ---
+        self.far_distance_m   = float(self.get_parameter('far_distance_m').value)
+        self.far_home_err_rad = float(self.get_parameter('far_home_err_rad').value)
+        self.far_speed_scale  = float(self.get_parameter('far_speed_scale').value)
+        # precomputed slow joint limits
+        self.qdot_lim_slow    = self.far_speed_scale * self.qdot_lim
+
         # -------- ROS I/O --------
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST)
         self.index_sub   = self.create_subscription(Int32, '/state/active_index', self._on_index, 10)
@@ -112,16 +125,11 @@ class RoboHandNode(Node):
         self.spiral_theta = 0.0
         self.spiral_center: Optional[np.ndarray] = None
 
-        # Waypoint approach bookkeeping (minimal changes)
-        self.wp_list: Optional[List[np.ndarray]] = None
-        self.wp_index: int = 0
-        self.N_wp: int = 60  # number of approach waypoints (tunable)
-
         # Logging helpers
         self._home_done_logged = False  # ensure "arrived HOME" logged once
 
         self.timer = self.create_timer(self.dt, self._tick)
-        self.get_logger().info('soes_robothand: HOME first, then MOVE -> APPROACH -> SWIRL on index.')
+        self.get_logger().info('soes_robothand: HOME first, then MOVE/SWIRL on index.')
 
     # ------------- Callbacks -------------
     def _on_index(self, msg: Int32):
@@ -212,14 +220,22 @@ class RoboHandNode(Node):
         self.swirl_pub.publish(Bool(data=bool(active)))
 
     def _home_step(self) -> bool:
-        """Joint-space home control."""
+        """Joint-space home control, with slower motion when far from home."""
         err = self.q_home - self.q
+        err_norm = float(np.linalg.norm(err))
+
+        # choose joint velocity limits: slow when far from home
+        if err_norm >= self.far_home_err_rad:
+            qdot_lim = self.qdot_lim_slow
+        else:
+            qdot_lim = self.qdot_lim
+
         qdot = self.kp_joint * err
-        qdot = np.clip(qdot, -self.qdot_lim, self.qdot_lim)
+        qdot = np.clip(qdot, -qdot_lim, qdot_lim)
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
 
         self._publish_targets(self.q, np.zeros(4), use_velocity=False)
-        at = float(np.linalg.norm(err)) <= self.home_tol
+        at = float(err_norm) <= self.home_tol
         self._publish_at(at)
 
         # Log once when HOME reached
@@ -232,7 +248,9 @@ class RoboHandNode(Node):
     def _ik_step(self, des_xyz: np.ndarray, xdot_ff: Optional[np.ndarray] = None) -> bool:
         cur_xyz = self.fk_xyz(self.q)
         err = des_xyz - cur_xyz
-        if np.linalg.norm(err) <= self.pos_tol:
+        dist = float(np.linalg.norm(err))
+
+        if dist <= self.pos_tol:
             if self.last_within_tol is None:
                 self.last_within_tol = self.get_clock().now()
         else:
@@ -245,7 +263,14 @@ class RoboHandNode(Node):
         J = self.jacobian(self.q)
         JJt = J @ J.T
         qdot = J.T @ np.linalg.solve(JJt + (self.lmbda**2) * np.eye(3), v)
-        qdot = np.clip(qdot, -self.qdot_lim, self.qdot_lim)
+
+        # choose joint velocity limits: slow when "far" in Cartesian space
+        if dist >= self.far_distance_m:
+            qdot_lim = self.qdot_lim_slow
+        else:
+            qdot_lim = self.qdot_lim
+
+        qdot = np.clip(qdot, -qdot_lim, qdot_lim)
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
 
         self._publish_targets(self.q, qdot, use_velocity=True)
@@ -258,37 +283,18 @@ class RoboHandNode(Node):
         self._publish_at(at)
         return at
 
-    # ------------- Waypoint builder (minimal addition) -------------
-    def _build_approach_waypoints(self, start_xyz: np.ndarray, target_xyz: np.ndarray):
-        """Generate N_wp linear waypoints between start_xyz and target_xyz."""
-        wp = []
-        for i in range(1, self.N_wp + 1):
-            tau = i / float(self.N_wp)
-            point = start_xyz * (1.0 - tau) + target_xyz * tau
-            wp.append(point)
-        self.wp_list = wp
-        self.wp_index = 0
-
     # ------------- Phase logic -------------
     def _start_swirl(self):
-        # prepare spiral about current center but first run APPROACH waypoints
+        # prepare spiral about current center
         if self.centers is None or self.active_index not in (0,1,2):
             return
 
         label = f"pos{self.active_index + 1}"
-        self.get_logger().info(f"[ROBOHAND] Arrived at {label}, preparing approach to swirl")
+        self.get_logger().info(f"[ROBOHAND] Arrived at {label}, starting swirl")
 
-        # set spiral center & reset theta
         self.spiral_center = np.array(self.centers[self.active_index], dtype=float)
         self.spiral_theta = 0.0
-
-        # Build approach waypoints from current end-effector position to spiral center
-        start_xyz = self.fk_xyz(self.q)   # current actual EE position
-        target_xyz = self.spiral_center.copy()
-        self._build_approach_waypoints(start_xyz, target_xyz)
-
-        # Enter APPROACH phase (will follow waypoints, then enter SWIRL)
-        self._enter(Phase.APPROACH, None)
+        self._enter(Phase.SWIRL, self.spiral_center.copy())
 
     def _tick(self):
         # ======== GLOBAL PAUSE GATING ========
@@ -315,24 +321,6 @@ class RoboHandNode(Node):
                 self._start_swirl()
             self._publish_swirl(False)
             return
-
-        # APPROACH (follow waypoints before starting swirl) - minimal addition
-        if self.phase == Phase.APPROACH and self.wp_list is not None:
-            # follow waypoints sequentially using continuous proportional IK (_ik_step)
-            if self.wp_index < len(self.wp_list):
-                wp = self.wp_list[self.wp_index]
-                reached = self._ik_step(wp)  # continuous proportional controller; no feedforward
-                if reached:
-                    # move to next waypoint after settling at this one
-                    self.wp_index += 1
-                self._publish_swirl(False)
-                return
-            else:
-                # done approach -> start swirl
-                self.get_logger().info("[APPROACH] Waypoints complete. Starting SWIRL.")
-                # enter SWIRL with current spiral_center
-                self._enter(Phase.SWIRL, self.spiral_center.copy() if self.spiral_center is not None else None)
-                return
 
         # SWIRL
         if self.phase == Phase.SWIRL and self.spiral_center is not None:
