@@ -63,20 +63,20 @@ class StateNode(Node):
         self.qual_sub  = self.create_subscription(VisionQuality, '/vision/quality', self.on_quality, qos)
         self.arm_pub   = self.create_publisher(JointTargets, '/arm/joint_targets', 10)
 
-        # subscribe to /arm/at_target to GATE transitions
+        # NEW: subscribe to /arm/at_target to GATE transitions
         self.arm_at       = False
         self.arm_at_since = None
         self.create_subscription(Bool, '/arm/at_target', self._on_at_target, 10)
 
-        # subscribe to /esp_switch_on to gate the whole state machine
+        # NEW: subscribe to /esp_switch_on to gate the whole state machine
         self.switch_on = False  # default OFF -> goes to IDLE until switch turns ON
         self.create_subscription(Bool, '/esp_switch_on', self._on_switch, 10)
 
-        # subscribe to /arm/swirl_active to control pump
+        # NEW: subscribe to /arm/swirl_active to control pump
         self.swirl_active = False
         self.create_subscription(Bool, '/arm/swirl_active', self._on_swirl, 10)
 
-        # subscribe to /esp_paused to globally pause state machine
+        # NEW: subscribe to /esp_paused to globally pause state machine
         self.paused = False
         self.pause_start = None
         self.create_subscription(Bool, '/esp_paused', self._on_paused, 10)
@@ -172,6 +172,9 @@ class StateNode(Node):
     def tick(self):
         # ======== GLOBAL PAUSE GATING ========
         if self.paused:
+            # Do nothing while ESP pause button is active:
+            # - phase is kept
+            # - timers are adjusted on resume (see _on_paused)
             return
 
         # ======== TEST_MOTOR ========
@@ -194,6 +197,7 @@ class StateNode(Node):
                 self.get_logger().info('ESP switch ON → restarting from INIT_POS.')
                 self._publish_index(-1)   # command HOME again
                 self._enter(Phase.INIT_POS)
+                # fall through into normal INIT_POS handling below
 
         # ======== NORMAL SEQUENCE ========
         if self.phase == Phase.INIT_POS:
@@ -201,6 +205,7 @@ class StateNode(Node):
             if self.arm_at and self.arm_at_since is not None:
                 if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
 
+                    # NEW SEQUENCE LOGIC
                     if self._step_idx == 0:
                         self._start_step(0)
 
@@ -216,10 +221,10 @@ class StateNode(Node):
 
         elif self.phase == Phase.STEP0:
             if self._run_step():
-                self.get_logger().info("STEP0 complete → STEP1")
-                self._step_idx = 1
-                self._publish_index(-1)        # trigger MOVE_BACK
-                self._enter(Phase.INIT_POS)    # wait for HOME
+                self.get_logger().info("STEP0 complete → STEP1")  # For checking
+                self._step_idx = 1  # NEXT is STEP1 after INIT_POS
+                self._publish_index(-1)
+                self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.STEP1:
             if self._run_step():
@@ -231,7 +236,7 @@ class StateNode(Node):
         elif self.phase == Phase.STEP2:
             if self._run_step():
                 self.get_logger().info("STEP2 complete → CAMERA")
-                self._step_idx = 3
+                self._step_idx = 3  # may or may not be used later
                 self._publish_index(-1)
                 self._enter(Phase.INIT_POS)
 
@@ -265,12 +270,7 @@ class StateNode(Node):
     def _start_step(self, step_idx: int):
         idx = self.order[step_idx]
         self._publish_index(idx)
-        if step_idx == 0:
-            self._enter(Phase.STEP0)
-        elif step_idx == 1:
-            self._enter(Phase.STEP1)
-        else:
-            self._enter(Phase.STEP2)
+        self._enter(Phase.STEP0 if step_idx == 0 else Phase.STEP1 if step_idx == 1 else Phase.STEP2)
 
     def _run_step(self):
         """
@@ -315,7 +315,7 @@ class StateNode(Node):
         jt = JointTargets()
         jt.position = [0.0, 0.0, 0.0, 0.0]
         jt.velocity = [0.0, 0.0, 0.0, 0.0]
-        jt.use_velocity = False  # position mode
+        jt.use_velocity = False  # we stay in position mode for tests
 
         # Servo neutral / range from parameters
         servo_neutral_deg = 90.0
@@ -328,22 +328,28 @@ class StateNode(Node):
         pump_msg.duty = 0.0
         pump_msg.duration_s = 0.0
 
+        # Use configured amplitudes from parameters
         amp0, amp1, amp2 = self.test_amp_rad
 
         if segment == 0:
+            # Test J0 only
             jt.position[0] = direction * amp0
 
         elif segment == 1:
+            # Test J1 only
             jt.position[1] = direction * amp1
 
         elif segment == 2:
+            # Test J2 only
             jt.position[2] = direction * amp2
 
         elif segment == 3:
+            # Test servo: flip between low/high angles
             angle_deg = servo_high_deg if direction > 0 else servo_low_deg
             jt.position[3] = math.radians(angle_deg)
 
         elif segment == 4:
+            # All joints move together
             jt.position[0] = direction * amp0
             jt.position[1] = direction * amp1
             jt.position[2] = direction * amp2
@@ -351,11 +357,13 @@ class StateNode(Node):
             jt.position[3] = math.radians(angle_deg)
 
         else:
+            # Pump test only: joints neutral, pump ON at full duty
             jt.position = [0.0, 0.0, 0.0, math.radians(servo_neutral_deg)]
             pump_msg.on = True
             pump_msg.duty = 1.0
-            pump_msg.duration_s = 0.0  # continuous
+            pump_msg.duration_s = 0.0  # continuous until we leave TEST_MOTOR
 
+        # Publish commands
         self.pump_pub.publish(pump_msg)
         self.arm_pub.publish(jt)
 
