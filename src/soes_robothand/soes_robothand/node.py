@@ -14,18 +14,19 @@ from soes_msgs.msg import JointTargets, CupcakeCenters
 
 # ---------------- Phases ----------------
 class Phase(enum.Enum):
-    HOME  = 0    # joint-space home (index = -1)
-    WAIT  = 1    # idle until /state/active_index changes
-    MOVE  = 2    # go to center i (Cartesian target)
-    SWIRL = 3    # generate spiral about center i
+    HOME      = 0    # joint-space home (index = -1)
+    WAIT      = 1    # idle until /state/active_index changes
+    MOVE      = 2    # go to center i (Cartesian target)
+    MOVE_BACK = 3    # go back from swirl to home (Cartesian target)
+    SWIRL     = 4    # generate spiral about center i
 
 
 class RoboHandNode(Node):
     """
     4-DOF arm: q = [q1 (yaw), q2, q3, q4] with analytic FK/J.
-    - index = -1 -> HOME (drive joints to q_home_rad)
+    - index = -1 -> HOME / MOVE_BACK (return to home)
     - index in {0,1,2} -> MOVE to centers[i], then SWIRL a spiral about that center
-    - Publishes /arm/at_target (Bool) when within tolerance (HOME/MOVE/SWIRL)
+    - Publishes /arm/at_target (Bool) when within tolerance (HOME/MOVE/MOVE_BACK/SWIRL)
     """
     def __init__(self):
         super().__init__('soes_robothand')
@@ -58,13 +59,13 @@ class RoboHandNode(Node):
         self.declare_parameter('height', 0.04)
         self.declare_parameter('omega', 0.5)  # rad/s
 
-        # -------- NEW: far-move slow mode --------
+        # -------- far-move slow mode --------
         # when Cartesian distance to target >= far_distance_m we scale down joint velocity limits.
         self.declare_parameter('far_distance_m', 0.15)      # "far" threshold in Cartesian space
         self.declare_parameter('far_home_err_rad', 1.0)     # kept for YAML compatibility (not used directly)
         self.declare_parameter('far_speed_scale', 0.4)      # 0 < scale <= 1, e.g. 0.4 => 40% of normal speed
 
-        # -------- NEW: simple velocity smoothing --------
+        # -------- simple velocity smoothing --------
         # 0 < vel_smooth_alpha <= 1; smaller = smoother (and slower response)
         self.declare_parameter('vel_smooth_alpha', 0.25)
 
@@ -95,14 +96,14 @@ class RoboHandNode(Node):
         self.theta_max = 2.0 * math.pi * self.turns
         self.s = (self.height / self.theta_max) if self.theta_max != 0.0 else 0.0
 
-        # --- load far/slow params ---
+        # --- far/slow params ---
         self.far_distance_m   = float(self.get_parameter('far_distance_m').value)
         self.far_home_err_rad = float(self.get_parameter('far_home_err_rad').value)  # not used directly
         self.far_speed_scale  = float(self.get_parameter('far_speed_scale').value)
         # precomputed slow joint limits (used for far moves AND HOME)
         self.qdot_lim_slow    = self.far_speed_scale * self.qdot_lim
 
-        # NEW: smoothing coefficient & previous velocity
+        # smoothing coefficient & previous velocity
         self.vel_alpha = float(self.get_parameter('vel_smooth_alpha').value)
         self.qdot_prev = np.zeros(4, dtype=float)
 
@@ -114,7 +115,7 @@ class RoboHandNode(Node):
         self.at_pub      = self.create_publisher(Bool, '/arm/at_target', 1)
         self.swirl_pub   = self.create_publisher(Bool, '/arm/swirl_active', 1)   # already used by StateNode
 
-        # NEW: subscribe to /esp_paused to freeze this node too
+        # subscribe to /esp_paused to freeze this node too
         self.paused = False
         self.create_subscription(Bool, '/esp_paused', self._on_paused, 10)
 
@@ -132,18 +133,25 @@ class RoboHandNode(Node):
         self.spiral_theta = 0.0
         self.spiral_center: Optional[np.ndarray] = None
 
+        # target Cartesian "home" point for MOVE_BACK
+        self.home_xyz = self.fk_xyz(self.q_home)
+
         # Logging helpers
         self._home_done_logged = False  # ensure "arrived HOME" logged once
+
+        # flag to know if we just finished a swirl
+        self.just_finished_swirl = False
 
         self.timer = self.create_timer(self.dt, self._tick)
         self.get_logger().info('soes_robothand: HOME first, then MOVE/SWIRL on index.')
 
     # ------------- Callbacks -------------
     def _on_index(self, msg: Int32):
-        prev = self.active_index
+        prev_idx = self.active_index
+        prev_phase = self.phase
         self.active_index = int(msg.data)
-        self.get_logger().info(f"active_index: {prev} -> {self.active_index}")
-        self._align_phase_with_index()
+        self.get_logger().info(f"active_index: {prev_idx} -> {self.active_index}")
+        self._align_phase_with_index(prev_phase)
 
     def _on_centers(self, msg: CupcakeCenters):
         self.centers = [(p.x, p.y, p.z) for p in msg.centers]
@@ -155,11 +163,18 @@ class RoboHandNode(Node):
         self.paused = bool(msg.data)
 
     # ------------- Phase selection -------------
-    def _align_phase_with_index(self):
-        # Moving to init pos (HOME)
+    def _align_phase_with_index(self, prev_phase: Phase):
+        # Returning / moving to init pos (HOME logic)
         if self.active_index == -1:
-            self.get_logger().info("[ROBOHAND] Moving to init pos (HOME)")
-            self._enter(Phase.HOME, None)
+            # If we just finished a swirl, use MOVE_BACK (Cartesian) instead of joint HOME
+            if self.just_finished_swirl:
+                self.just_finished_swirl = False
+                self.get_logger().info("[ROBOHAND] Returning from swirl to HOME (MOVE_BACK)")
+                self._enter(Phase.MOVE_BACK, self.home_xyz.copy())
+            else:
+                self.get_logger().info("[ROBOHAND] Moving to init pos (HOME)")
+                self._enter(Phase.HOME, None)
+
         # Moving to one of the cupcake positions
         elif self.active_index in (0, 1, 2) and self.centers and len(self.centers) >= 3:
             label = f"pos{self.active_index + 1}"
@@ -178,7 +193,7 @@ class RoboHandNode(Node):
         if new_phase == Phase.HOME:
             self._home_done_logged = False
 
-        # NEW: reset smoothed velocity so transitions ramp from rest
+        # reset smoothed velocity so transitions ramp from rest
         self.qdot_prev[:] = 0.0
 
         self.get_logger().info(f"[ROBOHAND] -> {self.phase.name} des={self.des_xyz if xyz is not None else None}")
@@ -229,7 +244,7 @@ class RoboHandNode(Node):
         """Tell StateNode whether we are in SWIRL phase or not."""
         self.swirl_pub.publish(Bool(data=bool(active)))
 
-    # NEW: first-order low-pass filter on joint velocities
+    # first-order low-pass filter on joint velocities
     def _smooth_qdot(self, qdot_cmd: np.ndarray) -> np.ndarray:
         """
         Smooth velocity changes:
@@ -250,7 +265,7 @@ class RoboHandNode(Node):
         qdot_raw = self.kp_joint * err
         qdot_raw = np.clip(qdot_raw, -qdot_lim, qdot_lim)
 
-        # NEW: smooth velocity so HOME transitions are curved
+        # smooth velocity so HOME transitions are curved
         qdot = self._smooth_qdot(qdot_raw)
 
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
@@ -294,7 +309,7 @@ class RoboHandNode(Node):
 
         qdot = np.clip(qdot, -qdot_lim, qdot_lim)
 
-        # NEW: smooth velocities so MOVE <-> SWIRL <-> HOME transitions are rounded
+        # smooth velocities so MOVE / MOVE_BACK / SWIRL transitions are rounded
         qdot = self._smooth_qdot(qdot)
 
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
@@ -340,11 +355,21 @@ class RoboHandNode(Node):
             self._publish_swirl(False)
             return
 
-        # MOVE
+        # MOVE (init_pos -> cupcake center)
         if self.phase == Phase.MOVE and self.des_xyz is not None:
             at = self._ik_step(self.des_xyz)
             if at:
                 self._start_swirl()
+            self._publish_swirl(False)
+            return
+
+        # MOVE_BACK (swirl -> home in Cartesian)
+        if self.phase == Phase.MOVE_BACK and self.des_xyz is not None:
+            at = self._ik_step(self.des_xyz)
+            # When we reach the Cartesian home, just wait for next index command
+            if at:
+                self.get_logger().info("[ROBOHAND] MOVE_BACK complete, waiting at home")
+                self._enter(Phase.WAIT, None)
             self._publish_swirl(False)
             return
 
@@ -375,6 +400,8 @@ class RoboHandNode(Node):
             if self.spiral_theta >= self.theta_max:
                 label = f"pos{self.active_index + 1}" if self.active_index in (0,1,2) else "current position"
                 self.get_logger().info(f"[SWIRL] Swirl done at {label}")
+                # Mark that we just finished a swirl; next index=-1 will trigger MOVE_BACK
+                self.just_finished_swirl = True
                 self._enter(Phase.WAIT, None)
                 self._publish_swirl(False)   # SWIRL ended
             else:
