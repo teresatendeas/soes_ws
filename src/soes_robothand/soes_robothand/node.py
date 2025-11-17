@@ -26,7 +26,7 @@ class RoboHandNode(Node):
     4-DOF arm: q = [q1 (yaw), q2, q3, q4] with analytic FK/J.
     - index = -1 -> HOME / MOVE_BACK (return to home)
     - index in {0,1,2} -> MOVE to centers[i], then SWIRL a spiral about that center
-    - Publishes /arm/at_target (Bool) when within tolerance (HOME/MOVE/MOVE_BACK/SWIRL)
+    - Publishes /arm/at_target (Bool) when within tolerance (HOME/MOVE/MOVE_BACK/SWIRL/WAIT-at-home)
     """
     def __init__(self):
         super().__init__('soes_robothand')
@@ -113,7 +113,7 @@ class RoboHandNode(Node):
         self.center_sub  = self.create_subscription(CupcakeCenters, '/vision/centers', self._on_centers, qos)
         self.targets_pub = self.create_publisher(JointTargets, '/arm/joint_targets', 10)
         self.at_pub      = self.create_publisher(Bool, '/arm/at_target', 1)
-        self.swirl_pub   = self.create_publisher(Bool, '/arm/swirl_active', 1)   # already used by StateNode
+        self.swirl_pub   = self.create_publisher(Bool, '/arm/swirl_active', 1)   # used by StateNode
 
         # subscribe to /esp_paused to freeze this node too
         self.paused = False
@@ -133,7 +133,7 @@ class RoboHandNode(Node):
         self.spiral_theta = 0.0
         self.spiral_center: Optional[np.ndarray] = None
 
-        # target Cartesian "home" point for MOVE_BACK
+        # target Cartesian "home" point for MOVE_BACK / WAIT home check
         self.home_xyz = self.fk_xyz(self.q_home)
 
         # Logging helpers
@@ -357,9 +357,13 @@ class RoboHandNode(Node):
 
         # WAIT
         if self.phase == Phase.WAIT:
-            # IMPORTANT: send a "hold" command so ESP stops any previous velocity motion
+            # Hold current pose in position mode so ESP stops velocity motion
+            cur_xyz = self.fk_xyz(self.q)
+            dist_home = float(np.linalg.norm(cur_xyz - self.home_xyz))
+            at_home = dist_home <= self.pos_tol
+
             self._publish_targets(self.q, np.zeros(4), use_velocity=False)
-            self._publish_at(False)
+            self._publish_at(at_home)
             self._publish_swirl(False)
             return
 
