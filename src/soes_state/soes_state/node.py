@@ -14,11 +14,13 @@ from .utils import PumpController
 
 class Phase(enum.Enum):
     INIT_POS    = 0
-    STEP        = 1        # <---- NEW unified step
-    CAMERA      = 2
-    ROLL_TRAY   = 3
-    IDLE        = 4
-    TEST_MOTOR  = 5
+    STEP0       = 1
+    STEP1       = 2
+    STEP2       = 3
+    CAMERA      = 4
+    ROLL_TRAY   = 5
+    IDLE        = 6
+    TEST_MOTOR  = 7
 
 
 class StateNode(Node):
@@ -67,14 +69,14 @@ class StateNode(Node):
         self.create_subscription(Bool, '/arm/at_target', self._on_at_target, 10)
 
         # NEW: subscribe to /esp_switch_on to gate the whole state machine
-        self.switch_on = False
+        self.switch_on = False  # default OFF -> goes to IDLE until switch turns ON
         self.create_subscription(Bool, '/esp_switch_on', self._on_switch, 10)
 
         # NEW: subscribe to /arm/swirl_active to control pump
         self.swirl_active = False
         self.create_subscription(Bool, '/arm/swirl_active', self._on_swirl, 10)
 
-        # NEW: subscribe to /esp_paused to globally pause
+        # NEW: subscribe to /esp_paused to globally pause state machine
         self.paused = False
         self.pause_start = None
         self.create_subscription(Bool, '/esp_paused', self._on_paused, 10)
@@ -83,10 +85,10 @@ class StateNode(Node):
         self.pump = PumpController(self._pump_on, self._pump_off)
 
         # ---------- Runtime ----------
-        self.phase = Phase.INIT_POS
+        self.phase = Phase.INIT_POS      # set TEST_MOTOR or INIT_POS
         self.phase_t0 = self.get_clock().now()
         self.quality_flag = False
-        self._step_idx = 0    # 0 → 1 → 2 for three spirals
+        self._step_idx = 0
         self._did_start_pump = False
 
         # 20 Hz tick
@@ -129,20 +131,37 @@ class StateNode(Node):
             self.arm_at_since = None
 
     def _on_switch(self, msg: Bool):
+        """
+        /esp_switch_on:
+          - False -> force state machine into IDLE
+          - True  -> if currently IDLE, restart from INIT_POS
+        """
         self.switch_on = bool(msg.data)
 
     def _on_swirl(self, msg: Bool):
+        """Track when RoboHand is in SWIRL phase."""
         self.swirl_active = bool(msg.data)
 
     def _on_paused(self, msg: Bool):
+        """
+        /esp_paused:
+          - True  -> freeze state machine (tick does nothing).
+          - False -> resume, adjusting timers so elapsed() ignores pause duration.
+        """
         new_state = bool(msg.data)
+
+        # Entering pause
         if new_state and not self.paused:
             self.pause_start = self.get_clock().now()
+
+        # Leaving pause
         elif not new_state and self.paused:
             if self.pause_start is not None:
                 dt = self.get_clock().now() - self.pause_start
+                # Shift phase_t0 forward by pause duration so _elapsed() doesn't count it
                 self.phase_t0 = self.phase_t0 + dt
                 self.pause_start = None
+
         self.paused = new_state
 
     # ---------- Callbacks ----------
@@ -151,44 +170,73 @@ class StateNode(Node):
 
     # ---------- Main tick ----------
     def tick(self):
+        # ======== GLOBAL PAUSE GATING ========
         if self.paused:
+            # Do nothing while ESP pause button is active:
+            # - phase is kept
+            # - timers are adjusted on resume (see _on_paused)
             return
 
+        # ======== TEST_MOTOR ========
         if self.phase == Phase.TEST_MOTOR:
             self._test_motor_tick()
             return
 
-        # SWITCH OFF => IDLE
+        # ======== SWITCH GATING (ESP) ========
         if not self.switch_on:
+            # Switch OFF → go/stay in IDLE, ensure pump OFF and arm commanded HOME
             if self.phase != Phase.IDLE:
                 self.get_logger().warn('ESP switch OFF → entering IDLE.')
                 self.pump.stop()
-                self._publish_index(-1)
+                self._publish_index(-1)   # go to HOME
                 self._enter(Phase.IDLE)
             return
-
-        # SWITCH turns ON while IDLE: restart
-        if self.phase == Phase.IDLE:
-            self.get_logger().info('ESP switch ON → restarting INIT_POS.')
-            self._publish_index(-1)
-            self._enter(Phase.INIT_POS)
-            return
+        else:
+            # Switch turned ON while in IDLE → restart from INIT_POS
+            if self.phase == Phase.IDLE:
+                self.get_logger().info('ESP switch ON → restarting from INIT_POS.')
+                self._publish_index(-1)   # command HOME again
+                self._enter(Phase.INIT_POS)
+                # fall through into normal INIT_POS handling below
 
         # ======== NORMAL SEQUENCE ========
         if self.phase == Phase.INIT_POS:
-            # Wait for HOME settle
+            # WAIT for robothand to confirm it is at HOME (via /arm/at_target)
             if self.arm_at and self.arm_at_since is not None:
                 if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
 
-                    # Run 3 spirals: 0,1,2
-                    if self._step_idx < 3:
-                        self._start_step(self._step_idx)
+                    # NEW SEQUENCE LOGIC
+                    if self._step_idx == 0:
+                        self._start_step(0)
+
+                    elif self._step_idx == 1:
+                        self._start_step(1)
+
+                    elif self._step_idx == 2:
+                        self._start_step(2)
+
                     else:
+                        # After STEP2 → INIT_POS → CAMERA
                         self._enter(Phase.CAMERA)
 
-        elif self.phase == Phase.STEP:
+        elif self.phase == Phase.STEP0:
             if self._run_step():
-                self._step_idx += 1
+                self.get_logger().info("STEP0 complete → STEP1")  # For checking
+                self._step_idx = 1  # NEXT is STEP1 after INIT_POS
+                self._publish_index(-1)
+                self._enter(Phase.INIT_POS)
+
+        elif self.phase == Phase.STEP1:
+            if self._run_step():
+                self.get_logger().info("STEP1 complete → STEP2")
+                self._step_idx = 2
+                self._publish_index(-1)
+                self._enter(Phase.INIT_POS)
+
+        elif self.phase == Phase.STEP2:
+            if self._run_step():
+                self.get_logger().info("STEP2 complete → CAMERA")
+                self._step_idx = 3  # may or may not be used later
                 self._publish_index(-1)
                 self._enter(Phase.INIT_POS)
 
@@ -210,9 +258,9 @@ class StateNode(Node):
             req.speed_mm_s  = self.roll_speed
             self.roll_cli.call_async(req)
 
-            # Restart full sequence
-            self._publish_index(-1)
-            self._step_idx = 0
+            # restart the cycle
+            self._publish_index(-1)     # back to HOME
+            self._step_idx = 0          # reset sequence
             self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.IDLE:
@@ -222,13 +270,13 @@ class StateNode(Node):
     def _start_step(self, step_idx: int):
         idx = self.order[step_idx]
         self._publish_index(idx)
-        self._enter(Phase.STEP)
+        self._enter(Phase.STEP0 if step_idx == 0 else Phase.STEP1 if step_idx == 1 else Phase.STEP2)
 
     def _run_step(self):
         """
-        Pump follows RoboHand SWIRL:
-          - swirl_active True  -> pump ON
-          - swirl_active False after True -> pump OFF and complete step
+        Pump now follows RoboHand SWIRL phase:
+          - while /arm/swirl_active == True  -> pump ON
+          - when it returns to False after having been True -> pump OFF and step complete
         """
         if self.swirl_active:
             if not self._did_start_pump:
@@ -246,41 +294,62 @@ class StateNode(Node):
 
     # ---------- TEST_MOTOR helper ----------
     def _test_motor_tick(self):
+        """
+        Simple hardware test:
+          seg0: J0 swings ±test_amp_rad[0]
+          seg1: J1 swings ±test_amp_rad[1]
+          seg2: J2 swings ±test_amp_rad[2]
+          seg3: servo toggles between low/high degrees
+          seg4: all joints move together
+          seg5+: pump ON (constant), joints neutral
+        """
         t = self._elapsed()
         period = self.test_period_s
+
+        # segment index increases every `period` seconds
         segment = int(t // period)
+
+        # direction flips every full period: +1, -1, +1, -1, ...
         direction = 1.0 if (segment % 2) == 0 else -1.0
 
         jt = JointTargets()
         jt.position = [0.0, 0.0, 0.0, 0.0]
         jt.velocity = [0.0, 0.0, 0.0, 0.0]
-        jt.use_velocity = False
+        jt.use_velocity = False  # we stay in position mode for tests
 
+        # Servo neutral / range from parameters
         servo_neutral_deg = 90.0
         servo_low_deg, servo_high_deg = self.test_servo_deg
         jt.position[3] = math.radians(servo_neutral_deg)
 
+        # Base pump command (OFF by default)
         pump_msg = PumpCmd()
         pump_msg.on = False
         pump_msg.duty = 0.0
         pump_msg.duration_s = 0.0
 
+        # Use configured amplitudes from parameters
         amp0, amp1, amp2 = self.test_amp_rad
 
         if segment == 0:
+            # Test J0 only
             jt.position[0] = direction * amp0
 
         elif segment == 1:
+            # Test J1 only
             jt.position[1] = direction * amp1
 
         elif segment == 2:
+            # Test J2 only
             jt.position[2] = direction * amp2
 
         elif segment == 3:
+            # Test servo: flip between low/high angles
             angle_deg = servo_high_deg if direction > 0 else servo_low_deg
             jt.position[3] = math.radians(angle_deg)
 
         elif segment == 4:
+            # All joints move together
             jt.position[0] = direction * amp0
             jt.position[1] = direction * amp1
             jt.position[2] = direction * amp2
@@ -288,11 +357,13 @@ class StateNode(Node):
             jt.position[3] = math.radians(angle_deg)
 
         else:
+            # Pump test only: joints neutral, pump ON at full duty
             jt.position = [0.0, 0.0, 0.0, math.radians(servo_neutral_deg)]
             pump_msg.on = True
             pump_msg.duty = 1.0
-            pump_msg.duration_s = 0.0
+            pump_msg.duration_s = 0.0  # continuous until we leave TEST_MOTOR
 
+        # Publish commands
         self.pump_pub.publish(pump_msg)
         self.arm_pub.publish(jt)
 
