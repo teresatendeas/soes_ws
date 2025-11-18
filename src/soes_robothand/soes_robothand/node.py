@@ -103,7 +103,9 @@ class RoboHandNode(Node):
         self.swirl_pub   = self.create_publisher(Bool, '/arm/swirl_active', 1)   # already used by StateNode
 
         # NEW: subscribe to /esp_paused to freeze this node too
+        # Note: improved pause handling now adjusts internal timers on resume so elapsed() doesn't count paused time
         self.paused = False
+        self.pause_start = None
         self.create_subscription(Bool, '/esp_paused', self._on_paused, 10)
 
         # -------- Runtime --------
@@ -139,8 +141,26 @@ class RoboHandNode(Node):
             self.get_logger().warn("centers < 3; waiting for all three targets")
 
     def _on_paused(self, msg: Bool):
-        """Freeze arm control loop when ESP pause is active."""
-        self.paused = bool(msg.data)
+        """
+        /esp_paused:
+          - True  -> freeze arm control loop (tick does nothing).
+          - False -> resume, adjusting timers so elapsed() ignores pause duration.
+        """
+        new_state = bool(msg.data)
+
+        # Entering pause
+        if new_state and not self.paused:
+            self.pause_start = self.get_clock().now()
+
+        # Leaving pause
+        elif not new_state and self.paused:
+            if self.pause_start is not None:
+                dt = self.get_clock().now() - self.pause_start
+                # Shift phase_t0 forward by pause duration so _elapsed() doesn't count it
+                self.phase_t0 = self.phase_t0 + dt
+                self.pause_start = None
+
+        self.paused = new_state
 
     # ------------- Phase selection -------------
     def _align_phase_with_index(self):
