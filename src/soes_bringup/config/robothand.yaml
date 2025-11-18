@@ -1,4 +1,4 @@
-soes_robothand:
+asoes_robothand:
   ros__parameters:
     rate_hz: 20.0
     pos_tol_m: 0.01
