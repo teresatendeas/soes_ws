@@ -15,12 +15,13 @@ from .utils import PumpController
 class Phase(enum.Enum):
     INIT_POS    = 0
     STEP0       = 1
-    STEP1       = 2
-    STEP2       = 3
-    CAMERA      = 4
-    ROLL_TRAY   = 5
+    # STEP1 and later phases are preserved but UNUSED in the "single-step" mode requested.
+    STEP1       = 2  # UNUSED in single-step mode
+    STEP2       = 3  # UNUSED in single-step mode
+    CAMERA      = 4  # UNUSED in single-step mode
+    ROLL_TRAY   = 5  # UNUSED in single-step mode
     IDLE        = 6
-    TEST_MOTOR  = 7
+    TEST_MOTOR  = 7  # retained for manual testing, UNUSED in normal single-step mode
 
 
 class StateNode(Node):
@@ -47,10 +48,10 @@ class StateNode(Node):
         self.roll_speed = float(self.get_parameter('roller_speed_mm_s').value)
         self.cam_to     = float(self.get_parameter('camera_timeout_s').value)
 
-        # TEST_MOTOR params
-        self.declare_parameter('test_period_s', 3.0)
-        self.declare_parameter('test_amp_rad', [0.4, 0.4, 0.4])
-        self.declare_parameter('test_servo_deg', [30.0, 150.0])
+        # TEST_MOTOR params (kept but UNUSED in single-step normal mode)
+        self.declare_parameter('test_period_s', 3.0)         # UNUSED in single-step
+        self.declare_parameter('test_amp_rad', [0.4, 0.4, 0.4])  # UNUSED in single-step
+        self.declare_parameter('test_servo_deg', [30.0, 150.0])  # UNUSED in single-step
         self.test_period_s = float(self.get_parameter('test_period_s').value)
         self.test_amp_rad  = list(self.get_parameter('test_amp_rad').value)
         self.test_servo_deg = list(self.get_parameter('test_servo_deg').value)
@@ -59,9 +60,9 @@ class StateNode(Node):
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST)
         self.index_pub = self.create_publisher(Int32, '/state/active_index', 1)
         self.pump_pub  = self.create_publisher(PumpCmd, '/pump/cmd', 1)
-        self.roll_cli  = self.create_client(RollTray, '/tray/roll')
-        self.qual_sub  = self.create_subscription(VisionQuality, '/vision/quality', self.on_quality, qos)
-        self.arm_pub   = self.create_publisher(JointTargets, '/arm/joint_targets', 10)
+        self.roll_cli  = self.create_client(RollTray, '/tray/roll')  # UNUSED in single-step mode (roll not invoked)
+        self.qual_sub  = self.create_subscription(VisionQuality, '/vision/quality', self.on_quality, qos)  # UNUSED in single-step mode
+        self.arm_pub   = self.create_publisher(JointTargets, '/arm/joint_targets', 10)  # only used in TEST_MOTOR / manual tests
 
         # NEW: subscribe to /arm/at_target to GATE transitions
         self.arm_at       = False
@@ -85,6 +86,7 @@ class StateNode(Node):
         self.pump = PumpController(self._pump_on, self._pump_off)
 
         # ---------- Runtime ----------
+        # Start at INIT_POS. The behavior is now: INIT_POS -> STEP0 -> IDLE (done).
         self.phase = Phase.INIT_POS      # set TEST_MOTOR or INIT_POS
         self.phase_t0 = self.get_clock().now()
         self.quality_flag = False
@@ -166,6 +168,7 @@ class StateNode(Node):
 
     # ---------- Callbacks ----------
     def on_quality(self, msg: VisionQuality):
+        # This quality check path is preserved but UNUSED in the single-step flow.
         self.quality_flag = bool(msg.needs_human)
 
     # ---------- Main tick ----------
@@ -179,6 +182,7 @@ class StateNode(Node):
 
         # ======== TEST_MOTOR ========
         if self.phase == Phase.TEST_MOTOR:
+            # TEST_MOTOR retained for hardware checks; not part of the single-step normal flow.
             self._test_motor_tick()
             return
 
@@ -205,28 +209,27 @@ class StateNode(Node):
             if self.arm_at and self.arm_at_since is not None:
                 if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
 
-                    # NEW SEQUENCE LOGIC
+                    # NEW SEQUENCE LOGIC: Only start STEP0 (single-step mode)
                     if self._step_idx == 0:
                         self._start_step(0)
 
-                    elif self._step_idx == 1:
-                        self._start_step(1)
-
-                    elif self._step_idx == 2:
-                        self._start_step(2)
-
-                    else:
-                        # After STEP2 → INIT_POS → CAMERA
-                        self._enter(Phase.CAMERA)
+                    # Note: _step_idx is never advanced beyond 0 in this single-step mode,
+                    # so STEP1/STEP2/CAMERA/ROLL_TRAY branches are effectively unused.
+                    # They remain in code for backward compatibility / future re-enable.
 
         elif self.phase == Phase.STEP0:
+            # Run STEP0. When it completes, stop the pump, publish HOME and go to IDLE (done).
             if self._run_step():
-                self.get_logger().info("STEP0 complete → STEP1")  # For checking
-                self._step_idx = 1  # NEXT is STEP1 after INIT_POS
+                self.get_logger().info("STEP0 complete → DONE (entering IDLE).")
+                # Ensure pump is off
+                self.pump.stop()
+                # Command HOME
                 self._publish_index(-1)
-                self._enter(Phase.INIT_POS)
+                # Enter IDLE to stop the state machine (single-step complete)
+                self._enter(Phase.IDLE)
 
         elif self.phase == Phase.STEP1:
+            # UNUSED in single-step mode: preserved for future multi-step operation
             if self._run_step():
                 self.get_logger().info("STEP1 complete → STEP2")
                 self._step_idx = 2
@@ -234,6 +237,7 @@ class StateNode(Node):
                 self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.STEP2:
+            # UNUSED in single-step mode: preserved for future multi-step operation
             if self._run_step():
                 self.get_logger().info("STEP2 complete → CAMERA")
                 self._step_idx = 3  # may or may not be used later
@@ -241,6 +245,7 @@ class StateNode(Node):
                 self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.CAMERA:
+            # UNUSED in single-step mode
             if self._elapsed() >= self.cam_to:
                 if self.quality_flag:
                     self.get_logger().warn('quality check requests attention.')
@@ -249,6 +254,7 @@ class StateNode(Node):
                 self._enter(Phase.ROLL_TRAY)
 
         elif self.phase == Phase.ROLL_TRAY:
+            # UNUSED in single-step mode
             if not self.roll_cli.service_is_ready():
                 self.get_logger().info('Waiting for /tray/roll ...')
                 return
@@ -258,18 +264,20 @@ class StateNode(Node):
             req.speed_mm_s  = self.roll_speed
             self.roll_cli.call_async(req)
 
-            # restart the cycle
+            # restart the cycle (unused for single-step)
             self._publish_index(-1)     # back to HOME
             self._step_idx = 0          # reset sequence
             self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.IDLE:
+            # IDLE is the final state in single-step mode
             return
 
     # ---------- Step logic ----------
     def _start_step(self, step_idx: int):
         idx = self.order[step_idx]
         self._publish_index(idx)
+        # Only STEP0 is used in this single-step flow; phases for STEP1/STEP2 retained but unused.
         self._enter(Phase.STEP0 if step_idx == 0 else Phase.STEP1 if step_idx == 1 else Phase.STEP2)
 
     def _run_step(self):
@@ -277,6 +285,8 @@ class StateNode(Node):
         Pump now follows RoboHand SWIRL phase:
           - while /arm/swirl_active == True  -> pump ON
           - when it returns to False after having been True -> pump OFF and step complete
+
+        This behavior is unchanged and is used for STEP0 in the single-step flow.
         """
         if self.swirl_active:
             if not self._did_start_pump:
@@ -302,6 +312,8 @@ class StateNode(Node):
           seg3: servo toggles between low/high degrees
           seg4: all joints move together
           seg5+: pump ON (constant), joints neutral
+
+        NOTE: TEST_MOTOR is retained but not part of the normal single-step flow.
         """
         t = self._elapsed()
         period = self.test_period_s
