@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-import enum
-import math
+import enum, math
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
@@ -14,14 +13,14 @@ from .utils import PumpController
 
 
 class Phase(enum.Enum):
-    INIT_POS = 0
-    STEP0 = 1
-    STEP1 = 2
-    STEP2 = 3
-    CAMERA = 4
-    ROLL_TRAY = 5
-    IDLE = 6
-    TEST_MOTOR = 7
+    INIT_POS    = 0
+    STEP0       = 1
+    STEP1       = 2
+    STEP2       = 3
+    CAMERA      = 4
+    ROLL_TRAY   = 5
+    IDLE        = 6
+    TEST_MOTOR  = 7
 
 
 class StateNode(Node):
@@ -40,32 +39,32 @@ class StateNode(Node):
         self.declare_parameter('camera_timeout_s', 2.0)
 
         # also use settle_before_pump_s as "arm_home_settle_s"
-        self.t_settle = float(self.get_parameter('settle_before_pump_s').value)
-        self.t_pump = float(self.get_parameter('pump_on_s').value)
-        self.t_swirl = float(self.get_parameter('swirl_time_s').value)
-        self.order = list(self.get_parameter('order').value)
-        self.roll_dist = float(self.get_parameter('roller_distance_mm').value)
+        self.t_settle   = float(self.get_parameter('settle_before_pump_s').value)
+        self.t_pump     = float(self.get_parameter('pump_on_s').value)
+        self.t_swirl    = float(self.get_parameter('swirl_time_s').value)
+        self.order      = list(self.get_parameter('order').value)
+        self.roll_dist  = float(self.get_parameter('roller_distance_mm').value)
         self.roll_speed = float(self.get_parameter('roller_speed_mm_s').value)
-        self.cam_to = float(self.get_parameter('camera_timeout_s').value)
+        self.cam_to     = float(self.get_parameter('camera_timeout_s').value)
 
         # TEST_MOTOR params
         self.declare_parameter('test_period_s', 3.0)
         self.declare_parameter('test_amp_rad', [0.4, 0.4, 0.4])
         self.declare_parameter('test_servo_deg', [30.0, 150.0])
         self.test_period_s = float(self.get_parameter('test_period_s').value)
-        self.test_amp_rad = list(self.get_parameter('test_amp_rad').value)
+        self.test_amp_rad  = list(self.get_parameter('test_amp_rad').value)
         self.test_servo_deg = list(self.get_parameter('test_servo_deg').value)
 
         # ---------- ROS I/O ----------
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST)
         self.index_pub = self.create_publisher(Int32, '/state/active_index', 1)
-        self.pump_pub = self.create_publisher(PumpCmd, '/pump/cmd', 1)
-        self.roll_cli = self.create_client(RollTray, '/tray/roll')
-        self.qual_sub = self.create_subscription(VisionQuality, '/vision/quality', self.on_quality, qos)
-        self.arm_pub = self.create_publisher(JointTargets, '/arm/joint_targets', 10)
+        self.pump_pub  = self.create_publisher(PumpCmd, '/pump/cmd', 1)
+        self.roll_cli  = self.create_client(RollTray, '/tray/roll')
+        self.qual_sub  = self.create_subscription(VisionQuality, '/vision/quality', self.on_quality, qos)
+        self.arm_pub   = self.create_publisher(JointTargets, '/arm/joint_targets', 10)
 
         # NEW: subscribe to /arm/at_target to GATE transitions
-        self.arm_at = False
+        self.arm_at       = False
         self.arm_at_since = None
         self.create_subscription(Bool, '/arm/at_target', self._on_at_target, 10)
 
@@ -86,7 +85,7 @@ class StateNode(Node):
         self.pump = PumpController(self._pump_on, self._pump_off)
 
         # ---------- Runtime ----------
-        self.phase = Phase.INIT_POS  # set TEST_MOTOR or INIT_POS
+        self.phase = Phase.INIT_POS      # set TEST_MOTOR or INIT_POS
         self.phase_t0 = self.get_clock().now()
         self.quality_flag = False
         self._step_idx = 0
@@ -110,23 +109,16 @@ class StateNode(Node):
         return (self.get_clock().now() - self.phase_t0).nanoseconds * 1e-9
 
     def _publish_index(self, idx: int):
-        msg = Int32()
-        msg.data = int(idx)
+        msg = Int32(); msg.data = int(idx)
         self.index_pub.publish(msg)
         self.get_logger().info(f'active_index = {idx}')
 
     def _pump_on(self, duty: float, duration_s: float):
-        msg = PumpCmd()
-        msg.on = True
-        msg.duty = float(duty)
-        msg.duration_s = float(duration_s)
+        msg = PumpCmd(); msg.on = True; msg.duty = float(duty); msg.duration_s = float(duration_s)
         self.pump_pub.publish(msg)
 
     def _pump_off(self):
-        msg = PumpCmd()
-        msg.on = False
-        msg.duty = 0.0
-        msg.duration_s = 0.0
+        msg = PumpCmd(); msg.on = False; msg.duty = 0.0; msg.duration_s = 0.0
         self.pump_pub.publish(msg)
 
     def _on_at_target(self, msg: Bool):
@@ -186,10 +178,9 @@ class StateNode(Node):
             return
 
         # ======== TEST_MOTOR ========
-        # NOTE: TEST_MOTOR behavior commented out per request (do not delete)
-        # if self.phase == Phase.TEST_MOTOR:
-        #     self._test_motor_tick()
-        #     return
+        if self.phase == Phase.TEST_MOTOR:
+            self._test_motor_tick()
+            return
 
         # ======== SWITCH GATING (ESP) ========
         if not self.switch_on:
@@ -218,64 +209,59 @@ class StateNode(Node):
                     if self._step_idx == 0:
                         self._start_step(0)
 
-                    # The following branches are intentionally disabled to restrict the sequence
-                    # to: INIT_POS -> STEP0 -> IDLE. They are left here as comments per request.
-                    # elif self._step_idx == 1:
-                    #     self._start_step(1)
-                    #
-                    # elif self._step_idx == 2:
-                    #     self._start_step(2)
-                    #
-                    # else:
-                    #     # After STEP2 → INIT_POS → CAMERA
-                    #     self._enter(Phase.CAMERA)
+                    elif self._step_idx == 1:
+                        self._start_step(1)
+
+                    elif self._step_idx == 2:
+                        self._start_step(2)
+
+                    else:
+                        # After STEP2 → INIT_POS → CAMERA
+                        self._enter(Phase.CAMERA)
 
         elif self.phase == Phase.STEP0:
             if self._run_step():
-                self.get_logger().info("STEP0 complete → IDLE")  # changed to go to IDLE
-                self._step_idx = 0  # reset so next cycle starts with STEP0 again
+                self.get_logger().info("STEP0 complete → STEP1")  # For checking
+                self._step_idx = 1  # NEXT is STEP1 after INIT_POS
                 self._publish_index(-1)
-                self._enter(Phase.IDLE)
+                self._enter(Phase.INIT_POS)
 
-        # The following phase handlers are commented out to keep only INIT_POS -> STEP0 -> IDLE.
-        # They are preserved (commented) instead of being deleted.
-        #
-        # elif self.phase == Phase.STEP1:
-        #     if self._run_step():
-        #         self.get_logger().info("STEP1 complete → STEP2")
-        #         self._step_idx = 2
-        #         self._publish_index(-1)
-        #         self._enter(Phase.INIT_POS)
-        #
-        # elif self.phase == Phase.STEP2:
-        #     if self._run_step():
-        #         self.get_logger().info("STEP2 complete → CAMERA")
-        #         self._step_idx = 3  # may or may not be used later
-        #         self._publish_index(-1)
-        #         self._enter(Phase.INIT_POS)
-        #
-        # elif self.phase == Phase.CAMERA:
-        #     if self._elapsed() >= self.cam_to:
-        #         if self.quality_flag:
-        #             self.get_logger().warn('quality check requests attention.')
-        #         else:
-        #             self.get_logger().info('quality check OK.')
-        #         self._enter(Phase.ROLL_TRAY)
-        #
-        # elif self.phase == Phase.ROLL_TRAY:
-        #     if not self.roll_cli.service_is_ready():
-        #         self.get_logger().info('Waiting for /tray/roll ...')
-        #         return
-        #
-        #     req = RollTray.Request()
-        #     req.distance_mm = self.roll_dist
-        #     req.speed_mm_s = self.roll_speed
-        #     self.roll_cli.call_async(req)
-        #
-        #     # restart the cycle
-        #     self._publish_index(-1)     # back to HOME
-        #     self._step_idx = 0          # reset sequence
-        #     self._enter(Phase.INIT_POS)
+        elif self.phase == Phase.STEP1:
+            if self._run_step():
+                self.get_logger().info("STEP1 complete → STEP2")
+                self._step_idx = 2
+                self._publish_index(-1)
+                self._enter(Phase.INIT_POS)
+
+        elif self.phase == Phase.STEP2:
+            if self._run_step():
+                self.get_logger().info("STEP2 complete → CAMERA")
+                self._step_idx = 3  # may or may not be used later
+                self._publish_index(-1)
+                self._enter(Phase.INIT_POS)
+
+        elif self.phase == Phase.CAMERA:
+            if self._elapsed() >= self.cam_to:
+                if self.quality_flag:
+                    self.get_logger().warn('quality check requests attention.')
+                else:
+                    self.get_logger().info('quality check OK.')
+                self._enter(Phase.ROLL_TRAY)
+
+        elif self.phase == Phase.ROLL_TRAY:
+            if not self.roll_cli.service_is_ready():
+                self.get_logger().info('Waiting for /tray/roll ...')
+                return
+
+            req = RollTray.Request()
+            req.distance_mm = self.roll_dist
+            req.speed_mm_s  = self.roll_speed
+            self.roll_cli.call_async(req)
+
+            # restart the cycle
+            self._publish_index(-1)     # back to HOME
+            self._step_idx = 0          # reset sequence
+            self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.IDLE:
             return
