@@ -131,7 +131,6 @@ class RoboHandNode(Node):
         prev = self.active_index
         self.active_index = int(msg.data)
         self.get_logger().info(f"active_index: {prev} -> {self.active_index}")
-        # Align phase with incoming index; make sure we stop SWIRL if index returns to -1
         self._align_phase_with_index()
 
     def _on_centers(self, msg: CupcakeCenters):
@@ -145,25 +144,17 @@ class RoboHandNode(Node):
 
     # ------------- Phase selection -------------
     def _align_phase_with_index(self):
-        # If StateNode commanded HOME (-1) -> force HOME, ensure swirl is off
+        # Moving to init pos (HOME)
         if self.active_index == -1:
-            self.get_logger().info("[ROBOHAND] Moving to init pos (HOME) due to active_index=-1")
+            self.get_logger().info("[ROBOHAND] Moving to init pos (HOME)")
             self._enter(Phase.HOME, None)
-            # make sure swirl is not published
-            self._publish_swirl(False)
-            return
-
         # Moving to one of the cupcake positions
-        if self.active_index in (0, 1, 2) and self.centers and len(self.centers) >= 3:
+        elif self.active_index in (0, 1, 2) and self.centers and len(self.centers) >= 3:
             label = f"pos{self.active_index + 1}"
             self.get_logger().info(f"[ROBOHAND] Moving to {label}")
             self._enter(Phase.MOVE, np.array(self.centers[self.active_index], dtype=float))
-            return
-
-        # Otherwise, wait
-        self._enter(Phase.WAIT, None)
-        # ensure swirl off
-        self._publish_swirl(False)
+        else:
+            self._enter(Phase.WAIT, None)
 
     def _enter(self, new_phase: Phase, xyz: Optional[np.ndarray]):
         self.phase = new_phase
@@ -174,18 +165,6 @@ class RoboHandNode(Node):
         # Reset HOME arrival logging when entering HOME
         if new_phase == Phase.HOME:
             self._home_done_logged = False
-            # Also reset spiral bookkeeping
-            self.spiral_theta = 0.0
-            self.spiral_center = None
-
-        # If not entering SWIRL, ensure swirl flag cleared (prevents stale swirl)
-        if new_phase != Phase.SWIRL:
-            # publish a one-shot false to ensure StateNode sees swirl ended
-            try:
-                self._publish_swirl(False)
-            except Exception:
-                # defensive: publisher may not be ready but that's OK
-                pass
 
         self.get_logger().info(f"[ROBOHAND] -> {self.phase.name} des={self.des_xyz if xyz is not None else None}")
 
@@ -255,10 +234,9 @@ class RoboHandNode(Node):
         err = self.q_home - self.q
         qdot = self.kp_joint * err
 
-        # More aggressive approach: scale commanded velocity directly
-        qdot = qdot * speed_scale
-        # Keep safety clipping to absolute joint velocity limits
-        qdot = np.clip(qdot, -self.qdot_lim, self.qdot_lim)
+        # Apply S-curve speed scaling to joint velocity limit
+        limit = self.qdot_lim * speed_scale
+        qdot = np.clip(qdot, -limit, limit)
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
 
         self._publish_targets(self.q, np.zeros(4), use_velocity=False)
@@ -295,10 +273,9 @@ class RoboHandNode(Node):
         JJt = J @ J.T
         qdot = J.T @ np.linalg.solve(JJt + (self.lmbda**2) * np.eye(3), v)
 
-        # More aggressive approach: scale commanded joint velocities directly
-        qdot = qdot * speed_scale
-        # Keep safety clipping to absolute joint velocity limits
-        qdot = np.clip(qdot, -self.qdot_lim, self.qdot_lim)
+        # Apply S-curve speed scaling to joint velocity limits
+        limit = self.qdot_lim * speed_scale
+        qdot = np.clip(qdot, -limit, limit)
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
 
         self._publish_targets(self.q, qdot, use_velocity=True)
