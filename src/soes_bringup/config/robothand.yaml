@@ -24,3 +24,7 @@ soes_robothand:
     omega: 2.0
 
     approach_duration_s: 1.5
+
+    move_profile_time_s: 1.5   # slower / smoother move to cupcake
+    home_profile_time_s: 1.5   # slower / smoother move back home
+
