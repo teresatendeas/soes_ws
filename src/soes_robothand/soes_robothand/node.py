@@ -17,7 +17,7 @@ class Phase(enum.Enum):
     HOME  = 0    # joint-space home (index = -1)
     WAIT  = 1    # idle until /state/active_index changes
     MOVE  = 2    # go to center i (Cartesian target)
-    SWIRL = 3    # generate spiral about center i
+    SWIRL = 3    # generate spiral about center i (or S-shape in Option A)
 
 
 class RoboHandNode(Node):
@@ -26,7 +26,13 @@ class RoboHandNode(Node):
     - index = -1 -> HOME (drive joints to q_home_rad)
     - index in {0,1,2} -> MOVE to centers[i], then SWIRL a spiral about that center
     - Publishes /arm/at_target (Bool) when within tolerance (HOME/MOVE/SWIRL)
+
+    Option A modifications:
+    - SWIRL phase replaced by 2-DOF S-shape generator (XY S inside circle at given Z).
+    - Only actively move q[0] (yaw) and q[1] (pitch). q[2], q[3] are kept unchanged (zeros or q_home).
+    - New ROS parameters (s-shape) added with defaults; can be tuned via YAML/ros2 param.
     """
+
     def __init__(self):
         super().__init__('soes_robothand')
 
@@ -50,13 +56,21 @@ class RoboHandNode(Node):
         self.declare_parameter('kp_joint', 3.0)                     # joint homing gain
         self.declare_parameter('home_tol_rad', 0.02)                # ~1.1°
 
-        # -------- Spiral parameters --------
+        # -------- Spiral parameters (legacy) --------
         # r(θ) = R0 * (1 + α θ), z(θ) = (height / θ_max) * θ,  θ̇ = ω
         self.declare_parameter('R0', 0.025)
         self.declare_parameter('turns', 3)
         self.declare_parameter('alpha', -0.03)
         self.declare_parameter('height', 0.04)
         self.declare_parameter('omega', 0.5)  # rad/s
+
+        # -------- NEW: S-shape parameters (Option A) --------
+        # All distances/lengths here are in meters to match link_lengths_m
+        self.declare_parameter('s_shape_R_m', 0.03)        # radius of bounding circle (m)
+        self.declare_parameter('s_shape_freq', 2)         # number of wiggles across sweep
+        self.declare_parameter('s_shape_amp_scale', 0.95) # amplitude scale (0..1)
+        self.declare_parameter('s_shape_n_points', 600)   # number of samples in S-curve
+        self.declare_parameter('s_shape_total_time_s', 8.0)  # time to traverse S-curve
 
         # -------- NEW: S-curve profile times (for HOME and MOVE) --------
         # These control how long the S-curve ramp takes. Tune in YAML.
@@ -90,6 +104,13 @@ class RoboHandNode(Node):
         self.theta_max = 2.0 * math.pi * self.turns
         self.s = (self.height / self.theta_max) if self.theta_max != 0.0 else 0.0
 
+        # S-shape params
+        self.s_shape_R       = float(self.get_parameter('s_shape_R_m').value)
+        self.s_shape_freq    = int(self.get_parameter('s_shape_freq').value)
+        self.s_shape_amp     = float(self.get_parameter('s_shape_amp_scale').value)
+        self.s_shape_n       = int(self.get_parameter('s_shape_n_points').value)
+        self.s_shape_total_t = float(self.get_parameter('s_shape_total_time_s').value)
+
         # NEW: profile durations
         self.move_T = float(self.get_parameter('move_profile_time_s').value)
         self.home_T = float(self.get_parameter('home_profile_time_s').value)
@@ -107,7 +128,8 @@ class RoboHandNode(Node):
         self.create_subscription(Bool, '/esp_paused', self._on_paused, 10)
 
         # -------- Runtime --------
-        self.q: np.ndarray = np.zeros(4, dtype=float)
+        # keep q as length 4 to remain compatible with downstream interfaces
+        self.q: np.ndarray = np.array(self.q_home.copy(), dtype=float)
         self.active_index: int = -1
         self.centers: Optional[List[Tuple[float,float,float]]] = None
 
@@ -116,9 +138,19 @@ class RoboHandNode(Node):
         self.last_within_tol = None
         self.des_xyz: Optional[np.ndarray] = None
 
-        # Spiral bookkeeping
+        # S-shape bookkeeping (Option A)
+        self.s_path: Optional[np.ndarray] = None  # Nx3 (m)
+        self.s_tvec: Optional[np.ndarray] = None
+        self.s_idx: int = 0
+        self.s_total_time: float = 0.0
+
+        # Spiral bookkeeping (legacy, still present)
         self.spiral_theta = 0.0
         self.spiral_center: Optional[np.ndarray] = None
+
+        # Active DOFs mask: only q0,q1 actively commanded by S-shape IK
+        # Keep q2,q3 fixed (hold near q_home)
+        self.active_dofs_mask = np.array([True, True, False, False], dtype=bool)
 
         # Logging helpers
         self._home_done_logged = False  # ensure "arrived HOME" logged once
@@ -186,6 +218,101 @@ class RoboHandNode(Node):
         # Avoid fully zero -> keep at least 0.1 so the arm still moves
         return max(scale, 0.1)
 
+    # ------------- S-shape generator (meters) -------------
+    def _generate_s_shape_for_center(
+        self,
+        center: np.ndarray,
+        R: float = None,
+        n_points: Optional[int] = None,
+        freq: Optional[int] = None,
+        amp_scale: Optional[float] = None,
+        z_draw: Optional[float] = None,
+        total_time: Optional[float] = None
+    ):
+        """
+        Generate an S-shaped path inside a circle around the given center.
+        Inputs/outputs are in meters (consistent with node link lengths).
+        center: np.array([Cx, Cy, Cz]) in meters
+        Returns dict with keys: Xd, Yd, Zd, Xd_feas, Yd_feas, Zd_feas, yaw, pitch, EE_x, EE_y, EE_z, t_vec, clamped_count
+        """
+        Cx, Cy, Cz = float(center[0]), float(center[1]), float(center[2])
+        R = self.s_shape_R if R is None else float(R)
+        n_points = self.s_shape_n if n_points is None else int(n_points)
+        freq = self.s_shape_freq if freq is None else int(freq)
+        amp_scale = self.s_shape_amp if amp_scale is None else float(amp_scale)
+        total_time = self.s_shape_total_t if total_time is None else float(total_time)
+        # default z_draw: use center's z if not provided
+        z_draw = Cz if z_draw is None else float(z_draw)
+
+        # Reachability sanity: using meters
+        if z_draw < (self.L1 - self.L2) or z_draw > (self.L1 + self.L2):
+            raise ValueError('z_draw outside reachable vertical band. Choose other z_draw.')
+
+        # Generate S curve (in meters)
+        y_sweep = np.linspace(Cy - R, Cy + R, n_points)
+        Xd = np.zeros(n_points)
+        Yd = np.zeros(n_points)
+        Zd = np.full(n_points, z_draw)
+
+        for k in range(n_points):
+            yk = y_sweep[k]
+            half_w = math.sqrt(max(0.0, R**2 - (yk - Cy)**2))
+            amp = amp_scale * half_w
+            u = k / (n_points - 1)
+            xk = Cx + amp * math.sin(2.0 * math.pi * freq * u)
+            Xd[k] = xk
+            Yd[k] = yk
+
+        # Reachability check & clamping (meters)
+        tol = 1e-9
+        Xd_feas = np.zeros_like(Xd)
+        Yd_feas = np.zeros_like(Yd)
+        Zd_feas = Zd.copy()
+
+        clamped_count = 0
+        for i in range(len(Xd)):
+            px = Xd[i]; py = Yd[i]; pz = Zd[i]
+            dxy = math.hypot(px, py)
+            dz = pz - self.L1
+            sdist = math.sqrt(dxy*dxy + dz*dz)
+            if sdist <= self.L2 + tol:
+                Xd_feas[i] = px; Yd_feas[i] = py
+            else:
+                clamped_count += 1
+                scale = self.L2 / sdist
+                dxy_c = dxy * scale
+                dz_c = dz * scale
+                if dxy > tol:
+                    Xd_feas[i] = (px / dxy) * dxy_c
+                    Yd_feas[i] = (py / dxy) * dxy_c
+                else:
+                    Xd_feas[i] = 0.0
+                    Yd_feas[i] = 0.0
+                Zd_feas[i] = self.L1 + dz_c
+
+        # Inverse kinematics (yaw + pitch) in radians for verification (not used directly to command joints here)
+        yaw = np.arctan2(Yd_feas, Xd_feas)
+        dproj = np.hypot(Xd_feas, Yd_feas)
+        pitch = np.arctan2(Zd_feas - self.L1, dproj)
+        near_zero = dproj < 1e-9
+        pitch = np.where(near_zero & (Zd_feas > self.L1), +math.pi/2.0, pitch)
+        pitch = np.where(near_zero & (Zd_feas < self.L1), -math.pi/2.0, pitch)
+
+        # Forward kinematics (verify)
+        EE_x = self.L2 * np.cos(pitch) * np.cos(yaw)
+        EE_y = self.L2 * np.cos(pitch) * np.sin(yaw)
+        EE_z = self.L1 + self.L2 * np.sin(pitch)
+
+        # Time vector
+        t_vec = np.linspace(0.0, total_time, len(Xd))
+
+        return {
+            "Xd": Xd, "Yd": Yd, "Zd": Zd,
+            "Xd_feas": Xd_feas, "Yd_feas": Yd_feas, "Zd_feas": Zd_feas,
+            "yaw": yaw, "pitch": pitch, "EE_x": EE_x, "EE_y": EE_y, "EE_z": EE_z,
+            "t_vec": t_vec, "clamped_count": clamped_count
+        }
+
     # ------------- Analytic FK & J (your model) -------------
     def fk_xyz(self, q: np.ndarray) -> np.ndarray:
         q1, q2, q3, q4 = q
@@ -216,9 +343,17 @@ class RoboHandNode(Node):
 
     # ------------- Controllers -------------
     def _publish_targets(self, q: np.ndarray, qdot: np.ndarray, use_velocity: bool):
+        # Ensure we always publish 4 entries (some controllers expect fixed length)
+        pos = list(q)
+        vel = list(qdot)
+        # pad if necessary
+        while len(pos) < 4:
+            pos.append(float(self.q_home[len(pos)] if len(self.q_home) > len(pos) else 0.0))
+        while len(vel) < 4:
+            vel.append(0.0)
         msg = JointTargets()
-        msg.position = [float(a) for a in q]
-        msg.velocity = [float(w) for w in qdot]
+        msg.position = [float(a) for a in pos[:4]]
+        msg.velocity = [float(w) for w in vel[:4]]
         msg.use_velocity = bool(use_velocity)
         self.targets_pub.publish(msg)
 
@@ -256,7 +391,9 @@ class RoboHandNode(Node):
         xdot_ff: Optional[np.ndarray] = None,
         speed_scale: float = 1.0
     ) -> bool:
-        """Cartesian IK step with S-curve speed scaling on joint velocity limits."""
+        """Cartesian IK step with S-curve speed scaling on joint velocity limits.
+        Modified for Option A: only update joints marked in self.active_dofs_mask.
+        """
         cur_xyz = self.fk_xyz(self.q)
         err = des_xyz - cur_xyz
         if np.linalg.norm(err) <= self.pos_tol:
@@ -272,6 +409,13 @@ class RoboHandNode(Node):
         J = self.jacobian(self.q)
         JJt = J @ J.T
         qdot = J.T @ np.linalg.solve(JJt + (self.lmbda**2) * np.eye(3), v)
+
+        # zero out qdot for inactive DOFs (Option A: keep q2,q3 at home)
+        if hasattr(self, 'active_dofs_mask') and len(self.active_dofs_mask) == len(qdot):
+            qdot = np.where(self.active_dofs_mask, qdot, 0.0)
+        else:
+            # fallback: if mask length mismatch, keep behavior unchanged
+            pass
 
         # Apply S-curve speed scaling to joint velocity limits
         limit = self.qdot_lim * speed_scale
@@ -290,15 +434,34 @@ class RoboHandNode(Node):
 
     # ------------- Phase logic -------------
     def _start_swirl(self):
-        # prepare spiral about current center
+        # prepare S-shape about current center (Option A)
         if self.centers is None or self.active_index not in (0,1,2):
             return
 
         label = f"pos{self.active_index + 1}"
-        self.get_logger().info(f"[ROBOHAND] Arrived at {label}, starting swirl")
+        self.get_logger().info(f"[ROBOHAND] Arrived at {label}, starting S-shape")
 
-        self.spiral_center = np.array(self.centers[self.active_index], dtype=float)
+        center = np.array(self.centers[self.active_index], dtype=float)
+        # generate S-shape in meters (center is assumed in meters)
+        res = self._generate_s_shape_for_center(
+            center=center,
+            R=self.s_shape_R,
+            n_points=self.s_shape_n,
+            freq=self.s_shape_freq,
+            amp_scale=self.s_shape_amp,
+            z_draw=center[2],
+            total_time=self.s_shape_total_t
+        )
+
+        # store feasible path (meters)
+        Xf = res['Xd_feas']; Yf = res['Yd_feas']; Zf = res['Zd_feas']
+        self.s_path = np.vstack((Xf, Yf, Zf)).T  # Nx3
+        self.s_tvec = res['t_vec']
+        self.s_total_time = self.s_shape_total_t
+        self.s_idx = 0
+        self.spiral_center = center.copy()  # reuse variable name for compatibility
         self.spiral_theta = 0.0
+
         self._enter(Phase.SWIRL, self.spiral_center.copy())
 
     def _tick(self):
@@ -331,39 +494,39 @@ class RoboHandNode(Node):
             self._publish_swirl(False)
             return
 
-        # SWIRL
-        if self.phase == Phase.SWIRL and self.spiral_center is not None:
-            if self.theta_max <= 0.0:
+        # SWIRL (Option A: follow precomputed S-shape path)
+        if self.phase == Phase.SWIRL and self.s_path is not None:
+            # time-based index into path
+            elapsed = self._elapsed()
+            if self.s_total_time <= 0.0:
+                # nothing to do: end immediately
                 self._enter(Phase.WAIT, None)
                 self._publish_swirl(False)
                 return
 
-            # Spiral pose
-            r = self.R0 * (1.0 + self.alpha * self.spiral_theta)
-            dx = r * math.cos(self.spiral_theta)
-            dy = r * math.sin(self.spiral_theta)
-            dz = self.s * self.spiral_theta   # linear height with theta
-            des = self.spiral_center + np.array([dx, dy, dz])
+            frac = min(1.0, elapsed / self.s_total_time)
+            idx = int(frac * (self.s_path.shape[0] - 1))
+            des = self.s_path[idx]
 
-            # Spiral feedforward (helps tracking)
-            rdot = self.R0 * self.alpha * self.omega
-            xdot = rdot * math.cos(self.spiral_theta) - r * self.omega * math.sin(self.spiral_theta)
-            ydot = rdot * math.sin(self.spiral_theta) + r * self.omega * math.cos(self.spiral_theta)
-            zdot = self.s * self.omega
-            ff = np.array([xdot, ydot, zdot])
-
-            # SWIRL: keep full speed for now (speed_scale=1.0)
-            self._ik_step(des, ff, speed_scale=1.0)
-            self.spiral_theta += self.omega * self.dt
-
-            if self.spiral_theta >= self.theta_max:
-                label = f"pos{self.active_index + 1}" if self.active_index in (0,1,2) else "current position"
-                self.get_logger().info(f"[SWIRL] Swirl done at {label}")
-                self._enter(Phase.WAIT, None)
-                self._publish_swirl(False)   # SWIRL ended
+            # compute feedforward velocity (finite difference)
+            if idx < self.s_path.shape[0] - 1:
+                dt = self.s_tvec[1] - self.s_tvec[0] if self.s_tvec.size > 1 else self.dt
+                next_p = self.s_path[min(self.s_path.shape[0]-1, idx+1)]
+                ff = (next_p - des) / max(dt, 1e-9)
             else:
-                self.get_logger().debug("[SWIRL] Active")
-                self._publish_swirl(True)    # still swirling
+                ff = np.zeros(3)
+
+            # call IK step (but only joints in active mask will update)
+            self._ik_step(des, xdot_ff=ff, speed_scale=1.0)
+
+            if frac >= 1.0:
+                label = f"pos{self.active_index + 1}" if self.active_index in (0,1,2) else "current position"
+                self.get_logger().info(f"[S-SHAPE] Done at {label}")
+                self._enter(Phase.WAIT, None)
+                self._publish_swirl(False)
+            else:
+                self.get_logger().debug("[S-SHAPE] Active")
+                self._publish_swirl(True)
             return
 
         # default
