@@ -177,10 +177,10 @@ class StateNode(Node):
             # - timers are adjusted on resume (see _on_paused)
             return
 
-        # ======== TEST_MOTOR ========
-        if self.phase == Phase.TEST_MOTOR:
-            self._test_motor_tick()
-            return
+        # ======== TEST_MOTOR ======== [COMMENTED OUT - Phase 7 inactive]
+        # if self.phase == Phase.TEST_MOTOR:
+        #     self._test_motor_tick()
+        #     return
 
         # ======== SWITCH GATING (ESP) ========
         if not self.switch_on:
@@ -212,12 +212,13 @@ class StateNode(Node):
                     elif self._step_idx == 1:
                         self._start_step(1)
 
-                    elif self._step_idx == 2:
-                        self._start_step(2)
+                    # [COMMENTED OUT - Phase 2 (STEP2) inactive]
+                    # elif self._step_idx == 2:
+                    #     self._start_step(2)
 
-                    else:
-                        # After STEP2 → INIT_POS → CAMERA
-                        self._enter(Phase.CAMERA)
+                    # else:
+                    #     # After STEP2 → INIT_POS → CAMERA
+                    #     self._enter(Phase.CAMERA)
 
         elif self.phase == Phase.STEP0:
             if self._run_step():
@@ -228,40 +229,43 @@ class StateNode(Node):
 
         elif self.phase == Phase.STEP1:
             if self._run_step():
-                self.get_logger().info("STEP1 complete → STEP2")
-                self._step_idx = 2
+                self.get_logger().info("STEP1 complete → IDLE")
+                # Transition to IDLE (Phase 6) instead of STEP2
                 self._publish_index(-1)
-                self._enter(Phase.INIT_POS)
+                self._enter(Phase.IDLE)
 
-        elif self.phase == Phase.STEP2:
-            if self._run_step():
-                self.get_logger().info("STEP2 complete → CAMERA")
-                self._step_idx = 3  # may or may not be used later
-                self._publish_index(-1)
-                self._enter(Phase.INIT_POS)
+        # [COMMENTED OUT - Phase 3 (STEP2) inactive]
+        # elif self.phase == Phase.STEP2:
+        #     if self._run_step():
+        #         self.get_logger().info("STEP2 complete → CAMERA")
+        #         self._step_idx = 3  # may or may not be used later
+        #         self._publish_index(-1)
+        #         self._enter(Phase.INIT_POS)
 
-        elif self.phase == Phase.CAMERA:
-            if self._elapsed() >= self.cam_to:
-                if self.quality_flag:
-                    self.get_logger().warn('quality check requests attention.')
-                else:
-                    self.get_logger().info('quality check OK.')
-                self._enter(Phase.ROLL_TRAY)
+        # [COMMENTED OUT - Phase 4 (CAMERA) inactive]
+        # elif self.phase == Phase.CAMERA:
+        #     if self._elapsed() >= self.cam_to:
+        #         if self.quality_flag:
+        #             self.get_logger().warn('quality check requests attention.')
+        #         else:
+        #             self.get_logger().info('quality check OK.')
+        #         self._enter(Phase.ROLL_TRAY)
 
-        elif self.phase == Phase.ROLL_TRAY:
-            if not self.roll_cli.service_is_ready():
-                self.get_logger().info('Waiting for /tray/roll ...')
-                return
-
-            req = RollTray.Request()
-            req.distance_mm = self.roll_dist
-            req.speed_mm_s  = self.roll_speed
-            self.roll_cli.call_async(req)
-
-            # restart the cycle
-            self._publish_index(-1)     # back to HOME
-            self._step_idx = 0          # reset sequence
-            self._enter(Phase.INIT_POS)
+        # [COMMENTED OUT - Phase 5 (ROLL_TRAY) inactive]
+        # elif self.phase == Phase.ROLL_TRAY:
+        #     if not self.roll_cli.service_is_ready():
+        #         self.get_logger().info('Waiting for /tray/roll ...')
+        #         return
+        #
+        #     req = RollTray.Request()
+        #     req.distance_mm = self.roll_dist
+        #     req.speed_mm_s  = self.roll_speed
+        #     self.roll_cli.call_async(req)
+        #
+        #     # restart the cycle
+        #     self._publish_index(-1)     # back to HOME
+        #     self._step_idx = 0          # reset sequence
+        #     self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.IDLE:
             return
