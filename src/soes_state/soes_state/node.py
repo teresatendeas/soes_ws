@@ -178,9 +178,10 @@ class StateNode(Node):
             return
 
         # ======== TEST_MOTOR ========
-        if self.phase == Phase.TEST_MOTOR:
-            self._test_motor_tick()
-            return
+        # COMMENTED OUT: TEST_MOTOR phase is inactive to restrict state machine to STEP0->STEP1->IDLE cycle
+        # if self.phase == Phase.TEST_MOTOR:
+        #     self._test_motor_tick()
+        #     return
 
         # ======== SWITCH GATING (ESP) ========
         if not self.switch_on:
@@ -205,19 +206,17 @@ class StateNode(Node):
             if self.arm_at and self.arm_at_since is not None:
                 if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
 
-                    # NEW SEQUENCE LOGIC
+                    # NEW SEQUENCE LOGIC - RESTRICTED TO STEP0->STEP1->IDLE
                     if self._step_idx == 0:
                         self._start_step(0)
 
                     elif self._step_idx == 1:
                         self._start_step(1)
 
-                    elif self._step_idx == 2:
-                        self._start_step(2)
-
                     else:
-                        # After STEP2 → INIT_POS → CAMERA
-                        self._enter(Phase.CAMERA)
+                        # For any other _step_idx value, enter IDLE (Phase 6)
+                        self.get_logger().info("Sequence complete → IDLE")
+                        self._enter(Phase.IDLE)
 
         elif self.phase == Phase.STEP0:
             if self._run_step():
@@ -228,40 +227,47 @@ class StateNode(Node):
 
         elif self.phase == Phase.STEP1:
             if self._run_step():
-                self.get_logger().info("STEP1 complete → STEP2")
-                self._step_idx = 2
-                self._publish_index(-1)
-                self._enter(Phase.INIT_POS)
+                self.get_logger().info("STEP1 complete → IDLE")
+                # Reset for next cycle and transition to IDLE
+                self._step_idx = 0
+                self._publish_index(-1)  # HOME
+                self._enter(Phase.IDLE)
 
-        elif self.phase == Phase.STEP2:
-            if self._run_step():
-                self.get_logger().info("STEP2 complete → CAMERA")
-                self._step_idx = 3  # may or may not be used later
-                self._publish_index(-1)
-                self._enter(Phase.INIT_POS)
+        # ======== STEP2 ========
+        # COMMENTED OUT: STEP2 phase is inactive to restrict state machine to STEP0->STEP1->IDLE cycle
+        # elif self.phase == Phase.STEP2:
+        #     if self._run_step():
+        #         self.get_logger().info("STEP2 complete → CAMERA")
+        #         self._step_idx = 3  # may or may not be used later
+        #         self._publish_index(-1)
+        #         self._enter(Phase.INIT_POS)
 
-        elif self.phase == Phase.CAMERA:
-            if self._elapsed() >= self.cam_to:
-                if self.quality_flag:
-                    self.get_logger().warn('quality check requests attention.')
-                else:
-                    self.get_logger().info('quality check OK.')
-                self._enter(Phase.ROLL_TRAY)
+        # ======== CAMERA ========
+        # COMMENTED OUT: CAMERA phase is inactive to restrict state machine to STEP0->STEP1->IDLE cycle
+        # elif self.phase == Phase.CAMERA:
+        #     if self._elapsed() >= self.cam_to:
+        #         if self.quality_flag:
+        #             self.get_logger().warn('quality check requests attention.')
+        #         else:
+        #             self.get_logger().info('quality check OK.')
+        #         self._enter(Phase.ROLL_TRAY)
 
-        elif self.phase == Phase.ROLL_TRAY:
-            if not self.roll_cli.service_is_ready():
-                self.get_logger().info('Waiting for /tray/roll ...')
-                return
-
-            req = RollTray.Request()
-            req.distance_mm = self.roll_dist
-            req.speed_mm_s  = self.roll_speed
-            self.roll_cli.call_async(req)
-
-            # restart the cycle
-            self._publish_index(-1)     # back to HOME
-            self._step_idx = 0          # reset sequence
-            self._enter(Phase.INIT_POS)
+        # ======== ROLL_TRAY ========
+        # COMMENTED OUT: ROLL_TRAY phase is inactive to restrict state machine to STEP0->STEP1->IDLE cycle
+        # elif self.phase == Phase.ROLL_TRAY:
+        #     if not self.roll_cli.service_is_ready():
+        #         self.get_logger().info('Waiting for /tray/roll ...')
+        #         return
+        #
+        #     req = RollTray.Request()
+        #     req.distance_mm = self.roll_dist
+        #     req.speed_mm_s  = self.roll_speed
+        #     self.roll_cli.call_async(req)
+        #
+        #     # restart the cycle
+        #     self._publish_index(-1)     # back to HOME
+        #     self._step_idx = 0          # reset sequence
+        #     self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.IDLE:
             return
