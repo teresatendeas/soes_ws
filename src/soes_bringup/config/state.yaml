@@ -6,7 +6,8 @@ soes_state:
     # ========================
     settle_before_pump_s: 2.0
     pump_on_s: 2.0
-    swirl_time_s: 1.0
+    # Aligned with robothand's s_shape_total_time_s (default 8.0)
+    swirl_time_s: 8.0
     order: [0, 1, 2]
 
     # ========================
@@ -20,18 +21,15 @@ soes_state:
     # ==========================
     camera_timeout_s: 5.0
 
-    # ==========================
-    # --- TESTING PARAMETERS ----
-    # ==========================
+    # =========================
+    # --- TESTING PARAMETERS --
+    # =========================
     test_period_s: 3.0
     test_amp_rad: [3.14, 3.14, 3.14]
     test_servo_deg: [30.0, 150.0]
 
-    
     # ==========================
-    # --- OPTIONAL (for future) -
+    # --- OPTIONAL (for future)
     # ==========================
-    # pump_duty: 1.0      # If you later expose duty cycle control
-    # at_target_topic: "/arm/at_target"   # If you add arm feedback
-
-
+    # pump_duty: 1.0
+    # at_target_topic: "/arm/at_target"
