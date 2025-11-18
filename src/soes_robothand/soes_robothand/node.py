@@ -255,9 +255,10 @@ class RoboHandNode(Node):
         err = self.q_home - self.q
         qdot = self.kp_joint * err
 
-        # Apply S-curve speed scaling to joint velocity limit
-        limit = self.qdot_lim * speed_scale
-        qdot = np.clip(qdot, -limit, limit)
+        # More aggressive approach: scale commanded velocity directly
+        qdot = qdot * speed_scale
+        # Keep safety clipping to absolute joint velocity limits
+        qdot = np.clip(qdot, -self.qdot_lim, self.qdot_lim)
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
 
         self._publish_targets(self.q, np.zeros(4), use_velocity=False)
@@ -294,9 +295,10 @@ class RoboHandNode(Node):
         JJt = J @ J.T
         qdot = J.T @ np.linalg.solve(JJt + (self.lmbda**2) * np.eye(3), v)
 
-        # Apply S-curve speed scaling to joint velocity limits
-        limit = self.qdot_lim * speed_scale
-        qdot = np.clip(qdot, -limit, limit)
+        # More aggressive approach: scale commanded joint velocities directly
+        qdot = qdot * speed_scale
+        # Keep safety clipping to absolute joint velocity limits
+        qdot = np.clip(qdot, -self.qdot_lim, self.qdot_lim)
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
 
         self._publish_targets(self.q, qdot, use_velocity=True)
