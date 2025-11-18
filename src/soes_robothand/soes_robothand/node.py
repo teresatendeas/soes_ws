@@ -232,14 +232,19 @@ class RoboHandNode(Node):
     def _home_step(self, speed_scale: float = 1.0) -> bool:
         """Joint-space home control with S-curve speed scaling."""
         err = self.q_home - self.q
-        qdot = self.kp_joint * err
+
+        # >>> changed: scale the command itself, not just the limit <<<
+        qdot = self.kp_joint * speed_scale * err
 
         # Apply S-curve speed scaling to joint velocity limit
         limit = self.qdot_lim * speed_scale
         qdot = np.clip(qdot, -limit, limit)
+
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
 
+        # In HOME we still use position mode on ESP (vel is ignored there)
         self._publish_targets(self.q, np.zeros(4), use_velocity=False)
+
         at = float(np.linalg.norm(err)) <= self.home_tol
         self._publish_at(at)
 
@@ -249,6 +254,7 @@ class RoboHandNode(Node):
             self._home_done_logged = True
 
         return at
+
 
     def _ik_step(
         self,
