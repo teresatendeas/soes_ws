@@ -26,5 +26,5 @@ soes_robothand:
     approach_duration_s: 1.5
 
     move_profile_time_s: 1.5   # slower / smoother move to cupcake
-    home_profile_time_s: 1.5   # slower / smoother move back home
+    home_profile_time_s: 5   # slower / smoother move back home
 
