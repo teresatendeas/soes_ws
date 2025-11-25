@@ -239,7 +239,7 @@ class RoboHandNode(Node):
         qdot = np.clip(qdot, -limit, limit)
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
 
-        self._publish_targets(self.q, np.zeros(4), use_velocity=True)
+        self._publish_targets(self.q, qdot, use_velocity=True)
         at = float(np.linalg.norm(err)) <= self.home_tol
         self._publish_at(at)
 
