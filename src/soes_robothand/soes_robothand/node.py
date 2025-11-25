@@ -230,25 +230,20 @@ class RoboHandNode(Node):
         self.swirl_pub.publish(Bool(data=bool(active)))
 
     def _home_step(self, speed_scale: float = 1.0) -> bool:
-        """Joint-space home control with S-curve speed scaling."""
-        err = self.q_home - self.q
-        qdot = self.kp_joint * err
-
-        # Apply S-curve speed scaling to joint velocity limit
-        limit = self.qdot_lim * speed_scale
-        qdot = np.clip(qdot, -limit, limit)
-        self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
-
-        self._publish_targets(self.q, qdot, use_velocity=True)
-        at = float(np.linalg.norm(err)) <= self.home_tol
-        self._publish_at(at)
-
-        # Log once when HOME reached
+        """Home motion in task space using the same IK servo as _ik_step."""
+        # Desired EE pose = FK of joint-space home configuration
+        des_xyz_home = self.fk_xyz(self.q_home)
+    
+        # Reuse the Cartesian IK step logic (Jacobian-based)
+        at = self._ik_step(des_xyz_home, xdot_ff=None, speed_scale=speed_scale)
+    
+        # Optionally log once when HOME (based on IK 'at' flag)
         if at and not self._home_done_logged:
             self.get_logger().info("[ROBOHAND] Arrived at init pos (HOME)")
             self._home_done_logged = True
-
+    
         return at
+
 
     def _ik_step(
         self,
