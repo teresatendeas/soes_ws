@@ -106,9 +106,13 @@ class VisionNode(Node):
         # Publish ROS messages
         msg_c = CupcakeCenters()
         msg_c.header.stamp = self.get_clock().now().to_msg()
-        for x,y,z in [(0,0,0),(0.1,0,0),(0.2,0,0)]:
-            p = Point(); p.x=x; p.y=y; p.z=z
-            msg_c.centers.append(p)
+        dummy_centers = [(0, 0, 0), (0.1, 0, 0), (0.2, 0, 0)]
+        for (x, y, z) in dummy_centers:
+        p = Point()
+        p.x = float(x)
+        p.y = float(y)
+        p.z = float(z)
+        msg_c.centers.append(p)
         self.centers_pub.publish(msg_c)
 
         msg_q = VisionQuality()
