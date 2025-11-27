@@ -108,11 +108,11 @@ class VisionNode(Node):
         msg_c.header.stamp = self.get_clock().now().to_msg()
         dummy_centers = [(0, 0, 0), (0.1, 0, 0), (0.2, 0, 0)]
         for (x, y, z) in dummy_centers:
-        p = Point()
-        p.x = float(x)
-        p.y = float(y)
-        p.z = float(z)
-        msg_c.centers.append(p)
+            p = Point()
+            p.x = float(x)
+            p.y = float(y)
+            p.z = float(z)
+            msg_c.centers.append(p)
         self.centers_pub.publish(msg_c)
 
         msg_q = VisionQuality()
