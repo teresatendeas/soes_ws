@@ -8,3 +8,30 @@ soes_vision:
 
     # Visualization
     visualize: true        # show OpenCV debug window
+
+    # Main timing + frame
+    publish_rate_hz: 5.0
+    frame_id: "robot_base"
+
+    # Dummy centers used for publishing /vision/centers
+    # (x1, y1, z1, x2, y2, z2, x3, y3, z3)
+    centers_m:
+      - 0.22   # cup 1 x
+      - 0.05   # cup 1 y
+      - -0.20   # cup 1 z
+      - 0.20   # cup 2 x
+      - 0.00   # cup 2 y
+      - 0.20   # cup 2 z
+      - 0.22   # cup 3 x
+      - -0.05  # cup 3 y
+      - -0.20   # cup 3 z
+
+    # Target diameter (for 3 cupcakes) in mm
+    diameter_mean_mm:
+      - 30.0
+      - 30.0
+      - 30.0
+
+    # If max(d) - min(d) > tol → needs_human = True
+    quality_tolerance_mm: 3.0
+
