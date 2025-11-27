@@ -139,7 +139,7 @@ class RoboHandNode(Node):
         if len(self.centers) < 3:
             self.get_logger().warn("centers < 3; waiting for all three targets")
             return
-        if self.active_index in (0, 1, 2):
+        self.active_index in (0, 1, 2) and self.phase in (Phase.HOME, Phase.WAIT):
             self.get_logger().info(
                 f"[ROBOHAND] Centers ready with active_index={self.active_index}, realigning phase."
             )
