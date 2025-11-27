@@ -129,7 +129,7 @@ class VisionNode(Node):
 
         msg_q = VisionQuality()
         msg_q.header.stamp = msg_c.header.stamp
-        msg_q.diameter_mm = diam if diam else [30,30,30]
+        msg_q.diameter_mm = diam if diam else [30.0,30.0,30.0]
         msg_q.score = score if score else [1.0,1.0,1.0]
         msg_q.needs_human = False
 
@@ -157,8 +157,8 @@ class VisionNode(Node):
                 conf = float(box.conf.cpu().numpy())
                 scores.append(conf)
 
-                cx = (x1+x2)/2
-                cy = (y1+y2)/2
+                cx = float((x1+x2)/2)
+                cy = float((y1+y2)/2)
                 centers.append((cx, cy))
 
                 diam_px = (x2-x1)
