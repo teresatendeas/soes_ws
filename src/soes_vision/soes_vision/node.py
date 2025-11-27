@@ -2,6 +2,7 @@
 import math
 import time
 from typing import List, Tuple, Optional
+import matplotlib.pyplot as plt
 
 import rclpy
 from rclpy.node import Node
@@ -228,6 +229,12 @@ class VisionNode(Node):
         try:
             # Ultralytics models accept numpy BGR frames directly
             results = self.model(frame, verbose=False)  # returns a Results object or list
+            # Visual check – show YOLO prediction image
+            plt.figure()
+            plt.imshow(results[0].plot())   # YOLO v8/v11 supports .plot()
+            plt.title("YOLO Prediction Output")
+            plt.axis('off')
+            plt.show()
             # results can be an iterator — pick first
             r = results[0] if isinstance(results, (list, tuple)) else results
 
