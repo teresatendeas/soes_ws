@@ -65,7 +65,9 @@ class VisionNode(Node):
         # Timer
         self.timer = self.create_timer(1.0 / self.rate, self._on_timer)
         self.get_logger().info("Vision node started.")
-
+        # YOLO FPS limiter
+        self.last_yolo_time = 0
+        self.yolo_interval = 0.20   # YOLO runs every 0.20 s → 5 FPS
 
     # ----------------------
     # Model Loading
@@ -93,12 +95,20 @@ class VisionNode(Node):
             self.get_logger().warn("Failed to capture frame.")
             return
 
-        # SHOW LIVE CAMERA
+    # LIVE VIEW (non-blocking & low CPU)
         cv2.imshow("Camera", frame)
         cv2.waitKey(1)
 
-        # Run YOLO if loaded
-        if self.model_mode == "ultralytics":
+    # ---------------------------
+    # YOLO RATE LIMITER (5 FPS)
+    # ---------------------------
+        now = time.time()
+        run_yolo = False
+        if now - self.last_yolo_time >= self.yolo_interval:
+            self.last_yolo_time = now
+            run_yolo = True
+
+        if run_yolo and self.model_mode == "ultralytics":
             centers, diam, score = self._run_ultralytics(frame)
         else:
             centers, diam, score = [], [], []
@@ -106,13 +116,15 @@ class VisionNode(Node):
         # Publish ROS messages
         msg_c = CupcakeCenters()
         msg_c.header.stamp = self.get_clock().now().to_msg()
-        dummy_centers = [(0, 0, 0), (0.1, 0, 0), (0.2, 0, 0)]
+
+        dummy_centers = [(0,0,0),(0.1,0,0),(0.2,0,0)]
         for (x, y, z) in dummy_centers:
             p = Point()
             p.x = float(x)
             p.y = float(y)
             p.z = float(z)
             msg_c.centers.append(p)
+
         self.centers_pub.publish(msg_c)
 
         msg_q = VisionQuality()
@@ -120,8 +132,8 @@ class VisionNode(Node):
         msg_q.diameter_mm = diam if diam else [30,30,30]
         msg_q.score = score if score else [1.0,1.0,1.0]
         msg_q.needs_human = False
-        self.quality_pub.publish(msg_q)
 
+        self.quality_pub.publish(msg_q)
 
     # ----------------------
     # Ultralytics YOLO inference
