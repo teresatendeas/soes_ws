@@ -9,6 +9,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import Point
 from soes_msgs.msg import CupcakeCenters, VisionQuality
 from sensor_msgs.msg import Image
+from std_msgs.msg import Int32  # NEW: subscribe to /state/phase
 
 import cv2
 import numpy as np
@@ -50,6 +51,10 @@ class VisionNode(Node):
         self.centers_pub = self.create_publisher(CupcakeCenters, '/vision/centers', qos)
         self.quality_pub = self.create_publisher(VisionQuality, '/vision/quality', qos)
 
+        # NEW: subscribe to state phase
+        self.state_phase = -1  # default unknown
+        self.create_subscription(Int32, '/state/phase', self._on_phase, qos)
+
         # Camera
         self.cap = cv2.VideoCapture(self.camera_index)
         if not self.cap.isOpened():
@@ -85,23 +90,32 @@ class VisionNode(Node):
         self.get_logger().warn("No model loaded, using fallback.")
         self.model_mode = "color_fallback"
 
+    # ----------------------
+    # Phase callback
+    # ----------------------
+    def _on_phase(self, msg: Int32):
+        self.state_phase = int(msg.data)
 
     # ----------------------
     # Timer callback
     # ----------------------
     def _on_timer(self):
+        # Only run camera + YOLO when state machine is in CAMERA phase (Phase.CAMERA = 4)
+        if self.state_phase != 4:
+            return
+
         ret, frame = self.cap.read()
         if not ret:
             self.get_logger().warn("Failed to capture frame.")
             return
 
-    # LIVE VIEW (non-blocking & low CPU)
+        # LIVE VIEW (non-blocking & low CPU)
         cv2.imshow("Camera", frame)
         cv2.waitKey(1)
 
-    # ---------------------------
-    # YOLO RATE LIMITER (5 FPS)
-    # ---------------------------
+        # ---------------------------
+        # YOLO RATE LIMITER (5 FPS)
+        # ---------------------------
         now = time.time()
         run_yolo = False
         if now - self.last_yolo_time >= self.yolo_interval:
@@ -117,7 +131,7 @@ class VisionNode(Node):
         msg_c = CupcakeCenters()
         msg_c.header.stamp = self.get_clock().now().to_msg()
 
-        dummy_centers = [(0,0,0),(0.1,0,0),(0.2,0,0)]
+        dummy_centers = [(0, 0, 0), (0.1, 0, 0), (0.2, 0, 0)]
         for (x, y, z) in dummy_centers:
             p = Point()
             p.x = float(x)
@@ -129,8 +143,8 @@ class VisionNode(Node):
 
         msg_q = VisionQuality()
         msg_q.header.stamp = msg_c.header.stamp
-        msg_q.diameter_mm = diam if diam else [30.0,30.0,30.0]
-        msg_q.score = score if score else [1.0,1.0,1.0]
+        msg_q.diameter_mm = diam if diam else [30.0, 30.0, 30.0]
+        msg_q.score = score if score else [1.0, 1.0, 1.0]
         msg_q.needs_human = False
 
         self.quality_pub.publish(msg_q)
@@ -153,15 +167,15 @@ class VisionNode(Node):
             scores = []
 
             for box in r.boxes:
-                x1,y1,x2,y2 = box.xyxy[0].cpu().numpy()
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                 conf = float(box.conf.cpu().numpy())
                 scores.append(conf)
 
-                cx = float((x1+x2)/2)
-                cy = float((y1+y2)/2)
+                cx = float((x1 + x2) / 2)
+                cy = float((y1 + y2) / 2)
                 centers.append((cx, cy))
 
-                diam_px = (x2-x1)
+                diam_px = (x2 - x1)
                 diams.append(diam_px * 0.5)   # placeholder
 
             return centers, diams, scores
