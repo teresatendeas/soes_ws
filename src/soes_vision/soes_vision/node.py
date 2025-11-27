@@ -50,8 +50,9 @@ class VisionNode(Node):
         self.rate = float(self.get_parameter('publish_rate_hz').value)
         self.frame_id = str(self.get_parameter('frame_id').value)
         self.camera_index = int(self.get_parameter('camera_index').value)
-        self.model_path = str(self.get_parameter('model_path').value)
-        self.model_type = str(self.get_parameter('model_type').value).lower()
+        # override params: always use ultralytics and GitHub model path
+        self.model_type = 'ultralytics'
+        self.model_path = "/home/jetson/soes_ws/src/soes_vision/weights/best.pt"   # <-- your GitHub path
 
         arr = list(self.get_parameter('centers_m').value)
         self.centers = [(arr[0],arr[1],arr[2]), (arr[3],arr[4],arr[5]), (arr[6],arr[7],arr[8])]
