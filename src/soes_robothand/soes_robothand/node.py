@@ -135,8 +135,16 @@ class RoboHandNode(Node):
 
     def _on_centers(self, msg: CupcakeCenters):
         self.centers = [(p.x, p.y, p.z) for p in msg.centers]
+
         if len(self.centers) < 3:
             self.get_logger().warn("centers < 3; waiting for all three targets")
+            return
+        if self.active_index in (0, 1, 2):
+            self.get_logger().info(
+                f"[ROBOHAND] Centers ready with active_index={self.active_index}, realigning phase."
+            )
+            self._align_phase_with_index()
+
 
     def _on_paused(self, msg: Bool):
         """Freeze arm control loop when ESP pause is active."""
