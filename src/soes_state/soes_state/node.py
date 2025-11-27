@@ -63,6 +63,9 @@ class StateNode(Node):
         self.qual_sub  = self.create_subscription(VisionQuality, '/vision/quality', self.on_quality, qos)
         self.arm_pub   = self.create_publisher(JointTargets, '/arm/joint_targets', 10)
 
+        # NEW: publish state phase
+        self.phase_pub = self.create_publisher(Int32, '/state/phase', 1)
+
         # NEW: subscribe to /arm/at_target to GATE transitions
         self.arm_at       = False
         self.arm_at_since = None
@@ -98,12 +101,16 @@ class StateNode(Node):
         # Tell robothand to go HOME
         self._publish_index(-1)
 
+        # Publish initial phase
+        self._publish_phase()
+
     # ---------- Helpers ----------
     def _enter(self, new_phase: Phase):
         self.phase = new_phase
         self.phase_t0 = self.get_clock().now()
         self._did_start_pump = False
         self.get_logger().info(f'[STATE] -> {self.phase.name}')
+        self._publish_phase()
 
     def _elapsed(self) -> float:
         return (self.get_clock().now() - self.phase_t0).nanoseconds * 1e-9
@@ -112,6 +119,11 @@ class StateNode(Node):
         msg = Int32(); msg.data = int(idx)
         self.index_pub.publish(msg)
         self.get_logger().info(f'active_index = {idx}')
+
+    def _publish_phase(self):
+        msg = Int32()
+        msg.data = int(self.phase.value)
+        self.phase_pub.publish(msg)
 
     def _pump_on(self, duty: float, duration_s: float):
         msg = PumpCmd(); msg.on = True; msg.duty = float(duty); msg.duration_s = float(duration_s)
