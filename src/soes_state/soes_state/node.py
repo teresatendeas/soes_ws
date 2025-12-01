@@ -6,8 +6,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.duration import Duration
 
 from std_msgs.msg import Bool, Int32
-from soes_msgs.msg import PumpCmd, VisionQuality, JointTargets
-from soes_msgs.srv import RollTray
+from soes_msgs.msg import PumpCmd, VisionQuality, JointTargets, RollerCmd
 
 from .utils import PumpController
 
@@ -56,30 +55,36 @@ class StateNode(Node):
         self.test_servo_deg = list(self.get_parameter('test_servo_deg').value)
 
         # ---------- ROS I/O ----------
-        qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST)
-        self.index_pub = self.create_publisher(Int32, '/state/active_index', 1)
-        self.pump_pub  = self.create_publisher(PumpCmd, '/pump/cmd', 1)
-        self.roll_cli  = self.create_client(RollTray, '/tray/roll')
-        self.qual_sub  = self.create_subscription(VisionQuality, '/vision/quality', self.on_quality, qos)
-        self.arm_pub   = self.create_publisher(JointTargets, '/arm/joint_targets', 10)
+        qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+        )
+        self.index_pub   = self.create_publisher(Int32, '/state/active_index', 1)
+        self.pump_pub    = self.create_publisher(PumpCmd, '/pump/cmd', 1)
+        self.roller_pub  = self.create_publisher(RollerCmd, '/roller/cmd', 1)
+        self.qual_sub    = self.create_subscription(
+            VisionQuality, '/vision/quality', self.on_quality, qos
+        )
+        self.arm_pub     = self.create_publisher(JointTargets, '/arm/joint_targets', 10)
 
-        # NEW: publish state phase
+        # publish state phase
         self.phase_pub = self.create_publisher(Int32, '/state/phase', 1)
 
-        # NEW: subscribe to /arm/at_target to GATE transitions
+        # subscribe to /arm/at_target to GATE transitions
         self.arm_at       = False
         self.arm_at_since = None
         self.create_subscription(Bool, '/arm/at_target', self._on_at_target, 10)
 
-        # NEW: subscribe to /esp_switch_on to gate the whole state machine
-        self.switch_on = False  # default OFF -> goes to IDLE until switch turns ON
+        # subscribe to /esp_switch_on to gate the whole state machine
+        self.switch_on = False
         self.create_subscription(Bool, '/esp_switch_on', self._on_switch, 10)
 
-        # NEW: subscribe to /arm/swirl_active to control pump
+        # subscribe to /arm/swirl_active to control pump
         self.swirl_active = False
         self.create_subscription(Bool, '/arm/swirl_active', self._on_swirl, 10)
 
-        # NEW: subscribe to /esp_paused to globally pause state machine
+        # subscribe to /esp_paused to globally pause state machine
         self.paused = False
         self.pause_start = None
         self.create_subscription(Bool, '/esp_paused', self._on_paused, 10)
@@ -93,6 +98,10 @@ class StateNode(Node):
         self.quality_flag = False
         self._step_idx = 0
         self._did_start_pump = False
+
+        # roller state for ROLL_TRAY
+        self._roller_active = False
+        self._roller_duration_s = 0.0
 
         # 20 Hz tick
         self.timer = self.create_timer(0.05, self.tick)
@@ -109,6 +118,12 @@ class StateNode(Node):
         self.phase = new_phase
         self.phase_t0 = self.get_clock().now()
         self._did_start_pump = False
+
+        # reset roller state whenever kita keluar dari ROLL_TRAY
+        if new_phase != Phase.ROLL_TRAY:
+            self._roller_active = False
+            self._roller_duration_s = 0.0
+
         self.get_logger().info(f'[STATE] -> {self.phase.name}')
         self._publish_phase()
 
@@ -116,7 +131,8 @@ class StateNode(Node):
         return (self.get_clock().now() - self.phase_t0).nanoseconds * 1e-9
 
     def _publish_index(self, idx: int):
-        msg = Int32(); msg.data = int(idx)
+        msg = Int32()
+        msg.data = int(idx)
         self.index_pub.publish(msg)
         self.get_logger().info(f'active_index = {idx}')
 
@@ -126,12 +142,23 @@ class StateNode(Node):
         self.phase_pub.publish(msg)
 
     def _pump_on(self, duty: float, duration_s: float):
-        msg = PumpCmd(); msg.on = True; msg.duty = float(duty); msg.duration_s = float(duration_s)
+        msg = PumpCmd()
+        msg.on = True
+        msg.duty = float(duty)
+        msg.duration_s = float(duration_s)
         self.pump_pub.publish(msg)
 
     def _pump_off(self):
-        msg = PumpCmd(); msg.on = False; msg.duty = 0.0; msg.duration_s = 0.0
+        msg = PumpCmd()
+        msg.on = False
+        msg.duty = 0.0
+        msg.duration_s = 0.0
         self.pump_pub.publish(msg)
+
+    def _roller_cmd(self, on: bool):
+        msg = RollerCmd()
+        msg.on = bool(on)
+        self.roller_pub.publish(msg)
 
     def _on_at_target(self, msg: Bool):
         if msg.data:
@@ -184,9 +211,6 @@ class StateNode(Node):
     def tick(self):
         # ======== GLOBAL PAUSE GATING ========
         if self.paused:
-            # Do nothing while ESP pause button is active:
-            # - phase is kept
-            # - timers are adjusted on resume (see _on_paused)
             return
 
         # ======== TEST_MOTOR ========
@@ -200,6 +224,7 @@ class StateNode(Node):
             if self.phase != Phase.IDLE:
                 self.get_logger().warn('ESP switch OFF → entering IDLE.')
                 self.pump.stop()
+                self._roller_cmd(False)
                 self._publish_index(-1)   # go to HOME
                 self._enter(Phase.IDLE)
             return
@@ -217,7 +242,6 @@ class StateNode(Node):
             if self.arm_at and self.arm_at_since is not None:
                 if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
 
-                    # NEW SEQUENCE LOGIC
                     if self._step_idx == 0:
                         self._start_step(0)
 
@@ -233,7 +257,7 @@ class StateNode(Node):
 
         elif self.phase == Phase.STEP0:
             if self._run_step():
-                self.get_logger().info("STEP0 complete → STEP1")  # For checking
+                self.get_logger().info("STEP0 complete → STEP1")
                 self._step_idx = 1  # NEXT is STEP1 after INIT_POS
                 self._publish_index(-1)
                 self._enter(Phase.INIT_POS)
@@ -261,19 +285,28 @@ class StateNode(Node):
                 self._enter(Phase.ROLL_TRAY)
 
         elif self.phase == Phase.ROLL_TRAY:
-            if not self.roll_cli.service_is_ready():
-                self.get_logger().info('Waiting for /tray/roll ...')
+            # Roller ON/OFF only, waktu ditentukan dari jarak & kecepatan
+            roll_time = self.roll_dist / max(self.roll_speed, 1e-3)
+            t = self._elapsed()
+
+            # Nyalakan roller sekali di awal fase
+            if not self._roller_active:
+                self._roller_active = True
+                self._roller_duration_s = roll_time
+                self._roller_cmd(True)
+                self.get_logger().info(f'ROLLER ON for {roll_time:.2f} s')
                 return
 
-            req = RollTray.Request()
-            req.distance_mm = self.roll_dist
-            req.speed_mm_s  = self.roll_speed
-            self.roll_cli.call_async(req)
+            # Setelah cukup waktu, matikan roller dan restart siklus
+            if t >= self._roller_duration_s:
+                self._roller_cmd(False)
+                self._roller_active = False
+                self.get_logger().info('ROLLER OFF, restart cycle.')
 
-            # restart the cycle
-            self._publish_index(-1)     # back to HOME
-            self._step_idx = 0          # reset sequence
-            self._enter(Phase.INIT_POS)
+                # restart the cycle
+                self._publish_index(-1)     # back to HOME
+                self._step_idx = 0          # reset sequence
+                self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.IDLE:
             return
@@ -282,7 +315,11 @@ class StateNode(Node):
     def _start_step(self, step_idx: int):
         idx = self.order[step_idx]
         self._publish_index(idx)
-        self._enter(Phase.STEP0 if step_idx == 0 else Phase.STEP1 if step_idx == 1 else Phase.STEP2)
+        self._enter(
+            Phase.STEP0 if step_idx == 0
+            else Phase.STEP1 if step_idx == 1
+            else Phase.STEP2
+        )
 
     def _run_step(self):
         """
