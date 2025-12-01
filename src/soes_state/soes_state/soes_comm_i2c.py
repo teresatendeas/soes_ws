@@ -6,7 +6,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from smbus2 import SMBus, i2c_msg
 
-from soes_msgs.msg import PumpCmd, JointTargets
+from soes_msgs.msg import PumpCmd, JointTargets, RollerCmd
 from std_msgs.msg import Bool
 
 STATUS_SWITCH_BIT = 0x01  # bit 0 in ESP32 status byte = switch ON/OFF
@@ -43,12 +43,13 @@ class I2CBridge(Node):
         # Subscriptions (Jetson -> ESP writes)
         self.create_subscription(PumpCmd, '/pump/cmd', self.on_pump, qos)
         self.create_subscription(JointTargets, '/arm/joint_targets', self.on_joint, qos)
+        self.create_subscription(RollerCmd, '/roller/cmd', self.on_roller, qos)
 
         # Publisher for ESP switch status (ESP -> Jetson reads)
         self.switch_pub = self.create_publisher(Bool, '/esp_switch_on', 10)
         self.last_switch_state = None
 
-        # NEW: publisher for ESP pause state
+        # Publisher for ESP pause state
         self.pause_pub = self.create_publisher(Bool, '/esp_paused', 10)
         self.last_pause_state = None
 
@@ -74,11 +75,29 @@ class I2CBridge(Node):
 
         on_u8 = 1 if msg.on else 0
 
-        frame = struct.pack('<BB', 0x10, on_u8)
+        frame = struct.pack('<BB', 0x10, on_u8)  # CMD_PUMP = 0x10
         self._i2c_send_raw(frame)
 
         if self.debug:
             self.get_logger().info(f'I2C PUMP (0x10) -> on={on_u8}')
+
+    # -------------------------------------------------------------------------
+    #  Roller command (write-only)
+    # -------------------------------------------------------------------------
+    def on_roller(self, msg: RollerCmd):
+        # If hardware is paused, ignore roller commands
+        if self.paused:
+            if self.debug:
+                self.get_logger().debug('ESP paused -> skipping roller command')
+            return
+
+        on_u8 = 1 if msg.on else 0
+
+        frame = struct.pack('<BB', 0x11, on_u8)  # CMD_ROLLER = 0x11
+        self._i2c_send_raw(frame)
+
+        if self.debug:
+            self.get_logger().info(f'I2C ROLLER (0x11) -> on={on_u8}')
 
     # -------------------------------------------------------------------------
     #  Joint command (write-only)
