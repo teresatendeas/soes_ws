@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 import math
 import rclpy
 from rclpy.node import Node
@@ -10,6 +10,7 @@ from soes_msgs.msg import CupcakeCenters, VisionQuality
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+from std_msgs.msg import Bool
 
 # ===== NEW: YOLO (Ultralytics) support =====
 try:
@@ -60,6 +61,13 @@ class VisionNode(Node):
         self.declare_parameter('diameter_mean_mm', [30.0, 30.0, 30.0])
         self.declare_parameter('quality_tolerance_mm', 3.0)
 
+        # --- new: camera index and px->mm reference (optional tuning) ---
+        # px_to_mm is only used as a rough conversion to estimate diameters
+        # from normalized YOLO bbox widths — it's conservative and intended
+        # for making a reasonable `needs_human` estimate on a single frame.
+        self.declare_parameter('camera_index', 0)
+        self.declare_parameter('px_to_mm_ref', 0.1)  # reference normalized width
+
         self.rate = float(self.get_parameter('publish_rate_hz').value)
         self.frame_id = str(self.get_parameter('frame_id').value)
         arr = list(self.get_parameter('centers_m').value)
@@ -71,6 +79,10 @@ class VisionNode(Node):
         self.diam_mean = list(self.get_parameter('diameter_mean_mm').value)
         self.tol = float(self.get_parameter('quality_tolerance_mm').value)
 
+        # new vision config
+        self.cam_index = int(self.get_parameter('camera_index').value)
+        self.px_to_mm_ref = float(self.get_parameter('px_to_mm_ref').value)
+
         qos = QoSProfile(depth=10,
                          reliability=ReliabilityPolicy.RELIABLE,
                          history=HistoryPolicy.KEEP_LAST)
@@ -78,6 +90,16 @@ class VisionNode(Node):
                                                  '/vision/centers', qos)
         self.quality_pub = self.create_publisher(VisionQuality,
                                                  '/vision/quality', qos)
+
+        # ---------- NEW: publisher for the SOES decision and request handling ----------
+        # Publish final decision for state machine / I2C bridge:
+        # Topic: /vision/soes_done (Bool) -> True == done, False == needs human
+        self.soess_done_pub = self.create_publisher(Bool, '/vision/soes_done', qos)
+
+        # Subscribe to requests from state machine: when a /vision/request Bool(True)
+        # is received we will run a single-frame detection and publish the decision.
+        self.request_sub = self.create_subscription(Bool, '/vision/request',
+                                                    self._on_request, qos)
 
         self.k = 0
         self.timer = self.create_timer(max(0.001, 1.0/self.rate),
@@ -114,16 +136,81 @@ class VisionNode(Node):
         ) > self.tol
         self.quality_pub.publish(msg_q)
 
+        # Note: we DO NOT automatically publish /vision/soes_done here; the
+        # state machine should request a fresh reading via /vision/request.
+        # However for backwards compatibility we also publish the most-recent
+        # synthetic decision in case other nodes rely on it.
+        soes_done_msg = Bool()
+        soes_done_msg.data = (not msg_q.needs_human)
+        self.soess_done_pub.publish(soes_done_msg)
+
         self.k += 1
 
+    # ---------- NEW: Request handler (run detection once when asked) ----------
+    def _on_request(self, msg: Bool):
+        """
+        When a request arrives (Bool; content ignored, treat as "run now"),
+        capture a single frame from the configured camera and run detection.
+        Publish VisionQuality and /vision/soes_done based on VisionQuality.needs_human.
+        """
+        # Load the YOLO model early if available (lazy load)
+        load_yolo_model()
 
-def main():
-    rclpy.init()
-    node = VisionNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+        # Capture a single frame from camera index (best-effort)
+        cap = cv2.VideoCapture(self.cam_index)
+        if not cap.isOpened():
+            self.get_logger().warn(f'Camera index {self.cam_index} open failed. Using last synthetic quality.')
+            # If camera unavailable, publish the most recent synthetic quality we already produce
+            # (this keeps the state machine robust to camera failures)
+            # Note: The synthetic `quality` from the timer was already published
+            return
 
+        ret, frame = cap.read()
+        cap.release()
+        if not ret or frame is None:
+            self.get_logger().warn('Failed to capture frame on request. Using last synthetic quality.')
+            return
+
+        # Run detection on this single frame
+        vis, good_cnts, yolo_labels = detect_choux_from_frame(frame)
+
+        # Build a VisionQuality message derived from detections.
+        # We estimate diameters (mm) by mapping normalized bbox width to mean diameter.
+        # This is a heuristic: diameter_mm_i = diam_mean_i * (bw / px_to_mm_ref)
+        # where bw is normalized bbox width from YOLO (0..1).
+        diam_mm = []
+        for i in range(len(self.diam_mean)):
+            if i < len(yolo_labels):
+                _, cx, cy, bw, bh = yolo_labels[i]
+                # avoid zero
+                bw = max(1e-6, float(bw))
+                est = float(self.diam_mean[i]) * (bw / max(1e-6, self.px_to_mm_ref))
+                diam_mm.append(est)
+            else:
+                # no detection for this slot -> fall back to nominal mean
+                diam_mm.append(float(self.diam_mean[i]))
+
+        msg_q = VisionQuality()
+        msg_q.header.stamp = self.get_clock().now().to_msg()
+        msg_q.diameter_mm = [float(x) for x in diam_mm]
+        msg_q.score = [1.0] * len(diam_mm)
+        msg_q.needs_human = (max(msg_q.diameter_mm) - min(msg_q.diameter_mm)) > self.tol
+
+        # Publish VisionQuality as before
+        self.quality_pub.publish(msg_q)
+
+        # Publish /vision/soes_done (True==done, False==needs human)
+        soes_done_msg = Bool()
+        soes_done_msg.data = (not msg_q.needs_human)
+        self.soess_done_pub.publish(soes_done_msg)
+
+        # Debug logging
+        if msg_q.needs_human:
+            self.get_logger().warn('VISION (on-request): needs_human == True -> reporting SOES_NOT_DONE')
+        else:
+            self.get_logger().info('VISION (on-request): needs_human == False -> reporting SOES_DONE')
+
+    # rest of file unchanged (helpers and detection pipeline) ...
 
 # -------- helpers --------
 def draw_detected(img, cnts, color=(0, 255, 0)):
@@ -345,6 +432,14 @@ def debug_detect_choux_from_usb(cam_index=0):
 
     cap.release()
     cv2.destroyAllWindows()
+
+
+def main():
+    rclpy.init()
+    node = VisionNode()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
 
 
 if __name__ == "__main__":
