@@ -11,6 +11,10 @@ from std_msgs.msg import Bool
 
 STATUS_SWITCH_BIT = 0x01  # bit 0 in ESP32 status byte = switch ON/OFF
 STATUS_PAUSE_BIT  = 0x02  # bit 1 in ESP32 status byte = PAUSE
+STATUS_SOES_BIT   = 0x04  # bit 2 in ESP32 status byte = SOES_DONE (new)
+
+# New command: SOES status from Jetson -> ESP
+CMD_SOES_STATUS = 0x20
 
 
 class I2CBridge(Node):
@@ -44,6 +48,10 @@ class I2CBridge(Node):
         self.create_subscription(PumpCmd, '/pump/cmd', self.on_pump, qos)
         self.create_subscription(JointTargets, '/arm/joint_targets', self.on_joint, qos)
         self.create_subscription(RollerCmd, '/roller/cmd', self.on_roller, qos)
+
+        # Subscribe to SOES decision published by VisionNode
+        # Topic: /vision/soes_done (Bool). When False -> needs human -> trigger LED+buzzer on ESP
+        self.create_subscription(Bool, '/vision/soes_done', self.on_soes_done, qos)
 
         # Publisher for ESP switch status (ESP -> Jetson reads)
         self.switch_pub = self.create_publisher(Bool, '/esp_switch_on', 10)
@@ -139,6 +147,23 @@ class I2CBridge(Node):
                 f'I2C 0x03 -> use_vel={use_velocity}, '
                 f'pos_s16={pos_s16}, vel_s16={vel_s16}'
             )
+
+    # -------------------------------------------------------------------------
+    #  SOES status from Vision (write-only)  <-- NEW
+    # -------------------------------------------------------------------------
+    def on_soes_done(self, msg: Bool):
+        # If hardware is paused, ignore soes status commands
+        if self.paused:
+            if self.debug:
+                self.get_logger().debug('ESP paused -> skipping soes status command')
+            return
+
+        soes_done_u8 = 1 if msg.data else 0
+        frame = struct.pack('<BB', CMD_SOES_STATUS, soes_done_u8)
+        self._i2c_send_raw(frame)
+
+        if self.debug:
+            self.get_logger().info(f'I2C SOES (0x20) -> soes_done={soes_done_u8}')
 
     # -------------------------------------------------------------------------
     #  Low-level I2C write
