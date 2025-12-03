@@ -92,6 +92,17 @@ class StateNode(Node):
         # Pump helper
         self.pump = PumpController(self._pump_on, self._pump_off)
 
+        # ---------- NEW: Vision request + soes_done forwarding ----------
+        # Publisher used to request a single-frame detection from VisionNode.
+        # VisionNode listens on '/vision/request' and responds by publishing
+        # '/vision/soes_done' (Bool: True==done, False==needs human).
+        self.vision_request_pub = self.create_publisher(Bool, '/vision/request', 1)
+
+        # Subscribe to '/vision/soes_done' so we can forward it to the I2C bridge
+        # (I2CBridge already subscribes to '/vision/soes_done' in the other node,
+        # but keeping this subscription here allows future logic if needed).
+        self.create_subscription(Bool, '/vision/soes_done', lambda m: None, qos)
+
         # ---------- Runtime ----------
         self.phase = Phase.INIT_POS      # set TEST_MOTOR or INIT_POS
         self.phase_t0 = self.get_clock().now()
@@ -123,6 +134,14 @@ class StateNode(Node):
         if new_phase != Phase.ROLL_TRAY:
             self._roller_active = False
             self._roller_duration_s = 0.0
+
+        # If we just entered CAMERA, request the camera to do detection
+        if new_phase == Phase.CAMERA:
+            # send a one-shot request to VisionNode to run detection now
+            req = Bool()
+            req.data = True
+            self.vision_request_pub.publish(req)
+            self.get_logger().info('Requested vision detection (vision/request).')
 
         self.get_logger().info(f'[STATE] -> {self.phase.name}')
         self._publish_phase()
@@ -278,6 +297,9 @@ class StateNode(Node):
 
         elif self.phase == Phase.CAMERA:
             if self._elapsed() >= self.cam_to:
+                # After camera timeout we expect VisionNode to have published
+                # /vision/soes_done (it is requested when entering CAMERA).
+                # We do not alter the normal flow; simply continue to ROLL_TRAY.
                 if self.quality_flag:
                     self.get_logger().warn('quality check requests attention.')
                 else:
