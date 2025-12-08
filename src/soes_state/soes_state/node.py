@@ -232,11 +232,6 @@ class StateNode(Node):
         if self.paused:
             return
 
-        # ======== TEST_MOTOR ========
-        if self.phase == Phase.TEST_MOTOR:
-            self._test_motor_tick()
-            return
-
         # ======== SWITCH GATING (ESP) ========
         if not self.switch_on:
             # Switch OFF → go/stay in IDLE, ensure pump OFF and arm commanded HOME
@@ -254,6 +249,11 @@ class StateNode(Node):
                 self._publish_index(-1)   # command HOME again
                 self._enter(Phase.INIT_POS)
                 # fall through into normal INIT_POS handling below
+
+        # ======== TEST_MOTOR ========
+        if self.phase == Phase.TEST_MOTOR:
+            self._test_motor_tick()
+            return
 
         # ======== NORMAL SEQUENCE ========
         if self.phase == Phase.INIT_POS:
