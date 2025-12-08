@@ -76,7 +76,7 @@ class StateNode(Node):
         self.arm_at_since = None
         self.create_subscription(Bool, '/arm/at_target', self._on_at_target, 10)
 
-        # subscribe to /esp_switch_on to gate the whole state machine
+        # subscribe to /esp_switch_on sebagai RESET button
         self.switch_on = False
         self.create_subscription(Bool, '/esp_switch_on', self._on_switch, 10)
 
@@ -92,15 +92,8 @@ class StateNode(Node):
         # Pump helper
         self.pump = PumpController(self._pump_on, self._pump_off)
 
-        # ---------- NEW: Vision request + soes_done forwarding ----------
-        # Publisher used to request a single-frame detection from VisionNode.
-        # VisionNode listens on '/vision/request' and responds by publishing
-        # '/vision/soes_done' (Bool: True==done, False==needs human).
+        # ---------- Vision request + soes_done ----------
         self.vision_request_pub = self.create_publisher(Bool, '/vision/request', 1)
-
-        # Subscribe to '/vision/soes_done' so we can forward it to the I2C bridge
-        # (I2CBridge already subscribes to '/vision/soes_done' in the other node,
-        # but keeping this subscription here allows future logic if needed).
         self.create_subscription(Bool, '/vision/soes_done', lambda m: None, qos)
 
         # ---------- Runtime ----------
@@ -137,7 +130,6 @@ class StateNode(Node):
 
         # If we just entered CAMERA, request the camera to do detection
         if new_phase == Phase.CAMERA:
-            # send a one-shot request to VisionNode to run detection now
             req = Bool()
             req.data = True
             self.vision_request_pub.publish(req)
@@ -190,11 +182,29 @@ class StateNode(Node):
 
     def _on_switch(self, msg: Bool):
         """
-        /esp_switch_on:
-          - False -> force state machine into IDLE
-          - True  -> if currently IDLE, restart from INIT_POS
+        /esp_switch_on dari ESP dipakai sebagai tombol RESET:
+          - False -> True : reset siklus, kembali ke INIT_POS
+          - True  -> False: force ke IDLE, matikan pump + roller
         """
+        prev = self.switch_on
         self.switch_on = bool(msg.data)
+
+        # rising edge: reset siklus
+        if not prev and self.switch_on:
+            self.get_logger().warn('ESP reset button PRESSED -> restart from INIT_POS.')
+            self.pump.stop()
+            self._roller_cmd(False)
+            self._publish_index(-1)   # go HOME
+            self._step_idx = 0        # ulang order
+            self._enter(Phase.INIT_POS)
+
+        # falling edge: masuk IDLE
+        elif prev and not self.switch_on:
+            self.get_logger().warn('ESP reset button RELEASED -> enter IDLE.')
+            self.pump.stop()
+            self._roller_cmd(False)
+            self._publish_index(-1)
+            self._enter(Phase.IDLE)
 
     def _on_swirl(self, msg: Bool):
         """Track when RoboHand is in SWIRL phase."""
@@ -216,7 +226,6 @@ class StateNode(Node):
         elif not new_state and self.paused:
             if self.pause_start is not None:
                 dt = self.get_clock().now() - self.pause_start
-                # Shift phase_t0 forward by pause duration so _elapsed() doesn't count it
                 self.phase_t0 = self.phase_t0 + dt
                 self.pause_start = None
 
@@ -231,24 +240,6 @@ class StateNode(Node):
         # ======== GLOBAL PAUSE GATING ========
         if self.paused:
             return
-
-        # ======== SWITCH GATING (ESP) ========
-        if not self.switch_on:
-            # Switch OFF → go/stay in IDLE, ensure pump OFF and arm commanded HOME
-            if self.phase != Phase.IDLE:
-                self.get_logger().warn('ESP switch OFF → entering IDLE.')
-                self.pump.stop()
-                self._roller_cmd(False)
-                self._publish_index(-1)   # go to HOME
-                self._enter(Phase.IDLE)
-            return
-        else:
-            # Switch turned ON while in IDLE → restart from INIT_POS
-            if self.phase == Phase.IDLE:
-                self.get_logger().info('ESP switch ON → restarting from INIT_POS.')
-                self._publish_index(-1)   # command HOME again
-                self._enter(Phase.INIT_POS)
-                # fall through into normal INIT_POS handling below
 
         # ======== TEST_MOTOR ========
         if self.phase == Phase.TEST_MOTOR:
@@ -297,9 +288,6 @@ class StateNode(Node):
 
         elif self.phase == Phase.CAMERA:
             if self._elapsed() >= self.cam_to:
-                # After camera timeout we expect VisionNode to have published
-                # /vision/soes_done (it is requested when entering CAMERA).
-                # We do not alter the normal flow; simply continue to ROLL_TRAY.
                 if self.quality_flag:
                     self.get_logger().warn('quality check requests attention.')
                 else:
@@ -403,24 +391,19 @@ class StateNode(Node):
         amp0, amp1, amp2 = self.test_amp_rad
 
         if segment == 0:
-            # Test J0 only
             jt.position[0] = direction * amp0
 
         elif segment == 1:
-            # Test J1 only
             jt.position[1] = direction * amp1
 
         elif segment == 2:
-            # Test J2 only
             jt.position[2] = direction * amp2
 
         elif segment == 3:
-            # Test servo: flip between low/high angles
             angle_deg = servo_high_deg if direction > 0 else servo_low_deg
             jt.position[3] = math.radians(angle_deg)
 
         elif segment == 4:
-            # All joints move together
             jt.position[0] = direction * amp0
             jt.position[1] = direction * amp1
             jt.position[2] = direction * amp2
@@ -428,13 +411,11 @@ class StateNode(Node):
             jt.position[3] = math.radians(angle_deg)
 
         else:
-            # Pump test only: joints neutral, pump ON at full duty
             jt.position = [0.0, 0.0, 0.0, math.radians(servo_neutral_deg)]
             pump_msg.on = True
             pump_msg.duty = 1.0
-            pump_msg.duration_s = 0.0  # continuous until we leave TEST_MOTOR
+            pump_msg.duration_s = 0.0
 
-        # Publish commands
         self.pump_pub.publish(pump_msg)
         self.arm_pub.publish(jt)
 
