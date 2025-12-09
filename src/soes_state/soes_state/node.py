@@ -189,11 +189,23 @@ class StateNode(Node):
         prev = self.switch_on
         self.switch_on = bool(msg.data)
 
+        # log perubahan untuk debug
+        self.get_logger().info(f'/esp_switch_on: {prev} -> {self.switch_on}')
+
         # rising edge: reset siklus
         if not prev and self.switch_on:
             self.get_logger().warn('ESP reset button PRESSED -> restart from INIT_POS.')
+
+            # pastikan semua OFF dan state arm di-reset
             self.pump.stop()
             self._roller_cmd(False)
+            self.swirl_active = False
+
+            # reset flag at_target supaya INIT_POS benar-benar tunggu HOME baru
+            self.arm_at = False
+            self.arm_at_since = None
+
+            # kirim perintah HOME ke RoboHand
             self._publish_index(-1)   # go HOME
             self._step_idx = 0        # ulang order
             self._enter(Phase.INIT_POS)
