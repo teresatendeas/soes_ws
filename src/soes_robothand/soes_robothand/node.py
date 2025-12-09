@@ -145,7 +145,6 @@ class RoboHandNode(Node):
             )
             self._align_phase_with_index()
 
-
     def _on_paused(self, msg: Bool):
         """Freeze arm control loop when ESP pause is active."""
         self.paused = bool(msg.data)
@@ -165,6 +164,9 @@ class RoboHandNode(Node):
             self._enter(Phase.WAIT, None)
 
     def _enter(self, new_phase: Phase, xyz: Optional[np.ndarray]):
+        # --- NEW: log sekali saat phase benar-benar berubah ---
+        old_phase = self.phase
+
         self.phase = new_phase
         self.phase_t0 = self.get_clock().now()
         self.last_within_tol = None
@@ -174,7 +176,15 @@ class RoboHandNode(Node):
         if new_phase == Phase.HOME:
             self._home_done_logged = False
 
-        self.get_logger().info(f"[ROBOHAND] -> {self.phase.name} des={self.des_xyz if xyz is not None else None}")
+        if new_phase != old_phase:
+            if self.des_xyz is not None:
+                self.get_logger().info(
+                    f"[ROBOHAND] Phase {old_phase.name} -> {new_phase.name}, des={self.des_xyz}"
+                )
+            else:
+                self.get_logger().info(
+                    f"[ROBOHAND] Phase {old_phase.name} -> {new_phase.name}"
+                )
 
     def _elapsed(self) -> float:
         return (self.get_clock().now() - self.phase_t0).nanoseconds * 1e-9
@@ -251,7 +261,6 @@ class RoboHandNode(Node):
             self._home_done_logged = True
     
         return at
-
 
     def _ik_step(
         self,
