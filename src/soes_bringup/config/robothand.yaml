@@ -21,10 +21,10 @@ soes_robothand:
     turns: 3
     alpha: -0.03
     height: 0.04
-    omega: 4.0
+    omega: 8.0
 
-    approach_duration_s: 1.5
+    approach_duration_s: 1.0
 
-    move_profile_time_s: 1.5   # slower / smoother move to cupcake
-    home_profile_time_s: 1.5   # slower / smoother move back home
+    move_profile_time_s: 1.0  # slower / smoother move to cupcake
+    home_profile_time_s: 1.0   # slower / smoother move back home
 
