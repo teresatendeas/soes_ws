@@ -60,6 +60,7 @@ class StateNode(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
         )
+
         self.index_pub   = self.create_publisher(Int32, '/state/active_index', 1)
         self.pump_pub    = self.create_publisher(PumpCmd, '/pump/cmd', 1)
         self.roller_pub  = self.create_publisher(RollerCmd, '/roller/cmd', 1)
@@ -71,7 +72,7 @@ class StateNode(Node):
         # publish state phase
         self.phase_pub = self.create_publisher(Int32, '/state/phase', 1)
 
-        # subscribe to /arm/at_target to GATE transitions
+        # subscribe to /arm/at_target
         self.arm_at       = False
         self.arm_at_since = None
         self.create_subscription(Bool, '/arm/at_target', self._on_at_target, 10)
@@ -84,7 +85,7 @@ class StateNode(Node):
         self.swirl_active = False
         self.create_subscription(Bool, '/arm/swirl_active', self._on_swirl, 10)
 
-        # subscribe to /esp_paused to globally pause state machine
+        # subscribe to /esp_paused
         self.paused = False
         self.pause_start = None
         self.create_subscription(Bool, '/esp_paused', self._on_paused, 10)
@@ -94,16 +95,26 @@ class StateNode(Node):
 
         # ---------- Vision request + soes_done ----------
         self.vision_request_pub = self.create_publisher(Bool, '/vision/request', 1)
-        self.create_subscription(Bool, '/vision/soes_done', lambda m: None, qos)
+
+        # NEW: store detection result
+        self.vision_done = None
+
+        # NEW: subscribe to result
+        self.create_subscription(
+            Bool,
+            '/vision/soes_done',
+            self._on_vision_done,
+            10
+        )
 
         # ---------- Runtime ----------
-        self.phase = Phase.INIT_POS      # set TEST_MOTOR or INIT_POS
+        self.phase = Phase.INIT_POS
         self.phase_t0 = self.get_clock().now()
         self.quality_flag = False
         self._step_idx = 0
         self._did_start_pump = False
 
-        # roller state for ROLL_TRAY
+        # roller state
         self._roller_active = False
         self._roller_duration_s = 0.0
 
@@ -113,9 +124,12 @@ class StateNode(Node):
 
         # Tell robothand to go HOME
         self._publish_index(-1)
-
-        # Publish initial phase
         self._publish_phase()
+
+    # ---------- Vision done callback ----------
+    def _on_vision_done(self, msg: Bool):
+        self.vision_done = bool(msg.data)
+        self.get_logger().info(f'Received soes_done = {self.vision_done}')
 
     # ---------- Helpers ----------
     def _enter(self, new_phase: Phase):
@@ -123,16 +137,19 @@ class StateNode(Node):
         self.phase_t0 = self.get_clock().now()
         self._did_start_pump = False
 
-        # reset roller state whenever kita keluar dari ROLL_TRAY
+        # reset roller state
         if new_phase != Phase.ROLL_TRAY:
             self._roller_active = False
             self._roller_duration_s = 0.0
 
-        # If we just entered CAMERA, request the camera to do detection
+        # If we enter CAMERA phase, request detection
         if new_phase == Phase.CAMERA:
+            self.vision_done = None
+
             req = Bool()
             req.data = True
             self.vision_request_pub.publish(req)
+
             self.get_logger().info('Requested vision detection (vision/request).')
 
         self.get_logger().info(f'[STATE] -> {self.phase.name}')
@@ -171,6 +188,7 @@ class StateNode(Node):
         msg.on = bool(on)
         self.roller_pub.publish(msg)
 
+    # ---------- Callbacks ----------
     def _on_at_target(self, msg: Bool):
         if msg.data:
             if not self.arm_at:
@@ -181,60 +199,38 @@ class StateNode(Node):
             self.arm_at_since = None
 
     def _on_switch(self, msg: Bool):
-        """
-        /esp_switch_on dari ESP dipakai sebagai tombol RESET:
-          - False -> True : reset siklus, kembali ke INIT_POS
-          - True  -> False: force ke IDLE, matikan pump + roller
-        """
         prev = self.switch_on
         self.switch_on = bool(msg.data)
 
-        # log perubahan untuk debug
         self.get_logger().info(f'/esp_switch_on: {prev} -> {self.switch_on}')
 
-        # rising edge: reset siklus
         if not prev and self.switch_on:
-            self.get_logger().warn('ESP reset button PRESSED -> restart from INIT_POS.')
-
-            # pastikan semua OFF dan state arm di-reset
+            self.get_logger().warn('ESP reset -> INIT_POS.')
             self.pump.stop()
             self._roller_cmd(False)
             self.swirl_active = False
-
-            # reset flag at_target supaya INIT_POS benar-benar tunggu HOME baru
             self.arm_at = False
             self.arm_at_since = None
-
-            # kirim perintah HOME ke RoboHand
-            self._publish_index(-1)   # go HOME
-            self._step_idx = 0        # ulang order
+            self._publish_index(-1)
+            self._step_idx = 0
             self._enter(Phase.INIT_POS)
 
-        # falling edge: masuk IDLE
         elif prev and not self.switch_on:
-            self.get_logger().warn('ESP reset button RELEASED -> enter IDLE.')
+            self.get_logger().warn('ESP released -> IDLE.')
             self.pump.stop()
             self._roller_cmd(False)
             self._publish_index(-1)
             self._enter(Phase.IDLE)
 
     def _on_swirl(self, msg: Bool):
-        """Track when RoboHand is in SWIRL phase."""
         self.swirl_active = bool(msg.data)
 
     def _on_paused(self, msg: Bool):
-        """
-        /esp_paused:
-          - True  -> freeze state machine (tick does nothing).
-          - False -> resume, adjusting timers so elapsed() ignores pause duration.
-        """
         new_state = bool(msg.data)
 
-        # Entering pause
         if new_state and not self.paused:
             self.pause_start = self.get_clock().now()
 
-        # Leaving pause
         elif not new_state and self.paused:
             if self.pause_start is not None:
                 dt = self.get_clock().now() - self.pause_start
@@ -243,24 +239,19 @@ class StateNode(Node):
 
         self.paused = new_state
 
-    # ---------- Callbacks ----------
     def on_quality(self, msg: VisionQuality):
         self.quality_flag = bool(msg.needs_human)
 
     # ---------- Main tick ----------
     def tick(self):
-        # ======== GLOBAL PAUSE GATING ========
         if self.paused:
             return
 
-        # ======== TEST_MOTOR ========
         if self.phase == Phase.TEST_MOTOR:
             self._test_motor_tick()
             return
 
-        # ======== NORMAL SEQUENCE ========
         if self.phase == Phase.INIT_POS:
-            # WAIT for robothand to confirm it is at HOME (via /arm/at_target)
             if self.arm_at and self.arm_at_since is not None:
                 if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
 
@@ -274,44 +265,57 @@ class StateNode(Node):
                         self._start_step(2)
 
                     else:
-                        # After STEP2 → INIT_POS → CAMERA
                         self._enter(Phase.CAMERA)
 
         elif self.phase == Phase.STEP0:
             if self._run_step():
-                self.get_logger().info("STEP0 complete → STEP1")
-                self._step_idx = 1  # NEXT is STEP1 after INIT_POS
+                self.get_logger().info("STEP0 → STEP1")
+                self._step_idx = 1
                 self._publish_index(-1)
                 self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.STEP1:
             if self._run_step():
-                self.get_logger().info("STEP1 complete → STEP2")
+                self.get_logger().info("STEP1 → STEP2")
                 self._step_idx = 2
                 self._publish_index(-1)
                 self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.STEP2:
             if self._run_step():
-                self.get_logger().info("STEP2 complete → CAMERA")
-                self._step_idx = 3  # may or may not be used later
+                self.get_logger().info("STEP2 → CAMERA")
+                self._step_idx = 3
                 self._publish_index(-1)
                 self._enter(Phase.INIT_POS)
 
+        # ===============================
+        # NEW CAMERA LOGIC (Full patch)
+        # ===============================
         elif self.phase == Phase.CAMERA:
-            if self._elapsed() >= self.cam_to:
-                if self.quality_flag:
-                    self.get_logger().warn('quality check requests attention.')
-                else:
-                    self.get_logger().info('quality check OK.')
-                self._enter(Phase.ROLL_TRAY)
 
+            # 1. A result arrived
+            if self.vision_done is not None:
+                if self.vision_done:
+                    self.get_logger().info("Vision OK → ROLL_TRAY")
+                    self._enter(Phase.ROLL_TRAY)
+                else:
+                    self.get_logger().warn("Vision BAD → IDLE")
+                    self._enter(Phase.IDLE)
+                return
+
+            # 2. Timeout with no result
+            if self._elapsed() >= self.cam_to:
+                self.get_logger().warn("Camera timeout → IDLE")
+                self._enter(Phase.IDLE)
+                return
+
+        # ------------------------------
+        # ROLL_TRAY (unchanged)
+        # ------------------------------
         elif self.phase == Phase.ROLL_TRAY:
-            # Roller ON/OFF only, waktu ditentukan dari jarak & kecepatan
             roll_time = self.roll_dist / max(self.roll_speed, 1e-3)
             t = self._elapsed()
 
-            # Nyalakan roller sekali di awal fase
             if not self._roller_active:
                 self._roller_active = True
                 self._roller_duration_s = roll_time
@@ -319,15 +323,13 @@ class StateNode(Node):
                 self.get_logger().info(f'ROLLER ON for {roll_time:.2f} s')
                 return
 
-            # Setelah cukup waktu, matikan roller dan restart siklus
             if t >= self._roller_duration_s:
                 self._roller_cmd(False)
                 self._roller_active = False
-                self.get_logger().info('ROLLER OFF, restart cycle.')
+                self.get_logger().info('ROLLER OFF, restart.')
 
-                # restart the cycle
-                self._publish_index(-1)     # back to HOME
-                self._step_idx = 0          # reset sequence
+                self._publish_index(-1)
+                self._step_idx = 0
                 self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.IDLE:
@@ -344,11 +346,6 @@ class StateNode(Node):
         )
 
     def _run_step(self):
-        """
-        Pump now follows RoboHand SWIRL phase:
-          - while /arm/swirl_active == True  -> pump ON
-          - when it returns to False after having been True -> pump OFF and step complete
-        """
         if self.swirl_active:
             if not self._did_start_pump:
                 self.pump.start(duty=1.0, duration_s=0.0)
@@ -359,47 +356,31 @@ class StateNode(Node):
             if self._did_start_pump:
                 self.pump.stop()
                 self._did_start_pump = False
-                self.get_logger().info('Pump OFF (SWIRL complete)')
+                self.get_logger().info('Pump OFF (step complete)')
                 return True
             return False
 
-    # ---------- TEST_MOTOR helper ----------
+    # ---------- TEST_MOTOR ----------
     def _test_motor_tick(self):
-        """
-        Simple hardware test:
-          seg0: J0 swings ±test_amp_rad[0]
-          seg1: J1 swings ±test_amp_rad[1]
-          seg2: J2 swings ±test_amp_rad[2]
-          seg3: servo toggles between low/high degrees
-          seg4: all joints move together
-          seg5+: pump ON (constant), joints neutral
-        """
         t = self._elapsed()
         period = self.test_period_s
-
-        # segment index increases every `period` seconds
         segment = int(t // period)
-
-        # direction flips every full period: +1, -1, +1, -1, ...
         direction = 1.0 if (segment % 2) == 0 else -1.0
 
         jt = JointTargets()
         jt.position = [0.0, 0.0, 0.0, 0.0]
         jt.velocity = [0.0, 0.0, 0.0, 0.0]
-        jt.use_velocity = False  # we stay in position mode for tests
+        jt.use_velocity = False
 
-        # Servo neutral / range from parameters
         servo_neutral_deg = 90.0
         servo_low_deg, servo_high_deg = self.test_servo_deg
         jt.position[3] = math.radians(servo_neutral_deg)
 
-        # Base pump command (OFF by default)
         pump_msg = PumpCmd()
         pump_msg.on = False
         pump_msg.duty = 0.0
         pump_msg.duration_s = 0.0
 
-        # Use configured amplitudes from parameters
         amp0, amp1, amp2 = self.test_amp_rad
 
         if segment == 0:
