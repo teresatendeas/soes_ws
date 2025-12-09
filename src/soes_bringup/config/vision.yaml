@@ -16,13 +16,13 @@ soes_vision:
     # Dummy centers used for publishing /vision/centers
     # (x1, y1, z1, x2, y2, z2, x3, y3, z3)
     centers_m:
-      - 0.15   # cup 1 x
+      - 0.20   # cup 1 x
       - 0.05   # cup 1 y
       - -0.15   # cup 1 z
-      - 0.15   # cup 2 x
+      - 0.20   # cup 2 x
       - 0.00   # cup 2 y
       - -0.15   # cup 2 z
-      - 0.15   # cup 3 x
+      - 0.20   # cup 3 x
       - -0.05  # cup 3 y
       - -0.15   # cup 3 z
 
