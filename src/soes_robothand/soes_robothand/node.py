@@ -269,22 +269,8 @@ class RoboHandNode(Node):
         speed_scale: float = 1.0
     ) -> bool:
         """Cartesian IK step with S-curve speed scaling on joint velocity limits."""
-        # --- Cek sudah settle dulu (supaya benar-benar stop) ---
-        if (
-            self.last_within_tol is not None and
-            (self.get_clock().now() - self.last_within_tol) >= Duration(seconds=self.settle_s)
-        ):
-            # Sudah di target dan sudah cukup lama di dalam tolerance
-            # -> jangan gerak lagi, kirim command "diam"
-            zero_vel = np.zeros_like(self.q)
-            self._publish_targets(self.q, zero_vel, use_velocity=False)
-            self._publish_at(True)
-            return True
-
-        # --- Normal IK step ---
         cur_xyz = self.fk_xyz(self.q)
         err = des_xyz - cur_xyz
-
         if np.linalg.norm(err) <= self.pos_tol:
             if self.last_within_tol is None:
                 self.last_within_tol = self.get_clock().now()
@@ -304,7 +290,6 @@ class RoboHandNode(Node):
         qdot = np.clip(qdot, -limit, limit)
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
 
-        # Selama belum settle, pakai velocity mode
         self._publish_targets(self.q, qdot, use_velocity=True)
 
         at = (
