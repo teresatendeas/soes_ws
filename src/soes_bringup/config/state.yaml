@@ -18,7 +18,7 @@ soes_state:
     # ==========================
     # --- VISION PARAMETERS ----
     # ==========================
-    camera_timeout_s: 5.0
+    camera_timeout_s: 20.0
 
     # ==========================
     # --- TESTING PARAMETERS ----
