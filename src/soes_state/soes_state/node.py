@@ -202,8 +202,6 @@ class StateNode(Node):
         prev = self.switch_on
         self.switch_on = bool(msg.data)
 
-        self.get_logger().info(f'/esp_switch_on: {prev} -> {self.switch_on}')
-
         if not prev and self.switch_on:
             self.get_logger().warn('ESP reset -> INIT_POS.')
             self.pump.stop()
@@ -292,6 +290,7 @@ class StateNode(Node):
         # NEW CAMERA LOGIC (Full patch)
         # ===============================
         elif self.phase == Phase.CAMERA:
+            self.get_logger().info("CAMERA Phase ON")
 
             # 1. A result arrived
             if self.vision_done is not None:
