@@ -31,6 +31,7 @@ def load_yolo_model(
         return None
 
     if _YOLO_MODEL is not None:
+        # Reuse cached model
         return _YOLO_MODEL
 
     print("[YOLO] Loading model (this may take a few seconds)...")
@@ -80,6 +81,9 @@ class VisionNode(Node):
         self.px_to_mm_ref = float(self.get_parameter('px_to_mm_ref').value)
         self.visualize = bool(self.get_parameter('visualize').value)
 
+        # flag untuk tulisan CAMERA Phase = True/False
+        self.camera_phase = False
+
         qos = QoSProfile(
             depth=10,
             reliability=ReliabilityPolicy.RELIABLE,
@@ -125,6 +129,13 @@ class VisionNode(Node):
             max(0.001, 1.0 / self.rate),
             self._on_timer
         )
+
+        # Timer visualisasi YOLO dari awal (kalau visualize = true)
+        self.vis_timer = None
+        if self.visualize:
+            # 10 Hz visualisasi
+            self.vis_timer = self.create_timer(0.1, self._on_vis_timer)
+
         self.get_logger().info('soes_vision started.')
 
     def _on_timer(self):
@@ -147,8 +158,44 @@ class VisionNode(Node):
 
         self.k += 1
 
+    def _on_vis_timer(self):
+        """Visualisasi YOLO live sejak start."""
+        if not self.visualize:
+            return
+        if self.cap is None or not self.cap.isOpened():
+            return
+
+        ret, frame = self.cap.read()
+        if not ret or frame is None:
+            return
+
+        # Jalankan YOLO untuk overlay
+        vis, _, _ = detect_choux_from_frame(frame)
+
+        # Tulis status CAMERA Phase
+        text = f"CAMERA Phase = {self.camera_phase}"
+        cv2.putText(
+            vis,
+            text,
+            (10, 30),  # kiri atas
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 0, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+        try:
+            cv2.imshow("soes_vision", vis)
+            cv2.waitKey(1)
+        except Exception as e:
+            self.get_logger().warn(f"OpenCV imshow failed: {e}")
+
     def _on_request(self, msg: Bool):
         self.get_logger().info("VISION REQUEST: running YOLO on one frame...")
+
+        # Sebagai indikasi sedang di CAMERA phase
+        self.camera_phase = True
 
         # Pastikan model sudah ada
         model = load_yolo_model()
@@ -160,23 +207,17 @@ class VisionNode(Node):
         # Pastikan kamera ready
         if self.cap is None or not self.cap.isOpened():
             self.get_logger().error("Camera not opened, cannot capture frame.")
+            self.camera_phase = False
             return
 
         ret, frame = self.cap.read()
         if not ret or frame is None:
             self.get_logger().error("Failed to read frame from camera.")
+            self.camera_phase = False
             return
 
         # Run detection (YOLO atau fallback)
         vis, good_cnts, yolo_labels = detect_choux_from_frame(frame)
-
-        # Debug window kalau visualize = True
-        if self.visualize and vis is not None:
-            try:
-                cv2.imshow("soes_vision", vis)
-                cv2.waitKey(1)
-            except Exception as e:
-                self.get_logger().warn(f"OpenCV imshow failed: {e}")
 
         # Estimasi diameter per cupcake (sangat sederhana)
         diam_mm = []
@@ -210,6 +251,9 @@ class VisionNode(Node):
             self.get_logger().warn('VISION (on-request): needs_human == True')
         else:
             self.get_logger().info('VISION (on-request): needs_human == False')
+
+        # selesai phase
+        self.camera_phase = False
 
     def destroy_node(self):
         # Pastikan kamera dan window rapi saat node mati
