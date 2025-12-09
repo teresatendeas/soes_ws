@@ -75,10 +75,14 @@ class I2CBridge(Node):
     #  Pump command (write-only)
     # -------------------------------------------------------------------------
     def on_pump(self, msg: PumpCmd):
-        # If hardware is paused, ignore pump commands
-        if self.paused:
+        """
+        Saat paused:
+          - PUMP ON di-skip
+          - PUMP OFF tetap dikirim (supaya reset/emergency bisa matikan pompa)
+        """
+        if self.paused and msg.on:
             if self.debug:
-                self.get_logger().debug('ESP paused -> skipping pump command')
+                self.get_logger().debug('ESP paused -> skipping PUMP ON')
             return
 
         on_u8 = 1 if msg.on else 0
@@ -93,10 +97,14 @@ class I2CBridge(Node):
     #  Roller command (write-only)
     # -------------------------------------------------------------------------
     def on_roller(self, msg: RollerCmd):
-        # If hardware is paused, ignore roller commands
-        if self.paused:
+        """
+        Saat paused:
+          - ROLLER ON di-skip
+          - ROLLER OFF tetap dikirim
+        """
+        if self.paused and msg.on:
             if self.debug:
-                self.get_logger().debug('ESP paused -> skipping roller command')
+                self.get_logger().debug('ESP paused -> skipping ROLLER ON')
             return
 
         on_u8 = 1 if msg.on else 0
@@ -111,7 +119,7 @@ class I2CBridge(Node):
     #  Joint command (write-only)
     # -------------------------------------------------------------------------
     def on_joint(self, msg: JointTargets):
-        # If hardware is paused, do not send new joint frames
+        # Jika hardware paused, jangan kirim frame joint baru
         if self.paused:
             if self.debug:
                 self.get_logger().debug('ESP paused -> skipping joint frame')
@@ -149,10 +157,10 @@ class I2CBridge(Node):
             )
 
     # -------------------------------------------------------------------------
-    #  SOES status from Vision (write-only)  <-- NEW
+    #  SOES status from Vision (write-only)
     # -------------------------------------------------------------------------
     def on_soes_done(self, msg: Bool):
-        # If hardware is paused, ignore soes status commands
+        # Jika paused, abaikan command ini
         if self.paused:
             if self.debug:
                 self.get_logger().debug('ESP paused -> skipping soes status command')
