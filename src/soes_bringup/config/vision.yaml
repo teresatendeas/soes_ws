@@ -2,36 +2,31 @@ soes_vision:
   ros__parameters:
 
     # Camera settings
-    camera_index: 0        # must match node.py (NOT camera_id)
-    publish_rate_hz: 10.0  # rate at which detection runs and publishes
-    frame_id: "camera_frame"
-
-    # Visualization
-    visualize: true        # show OpenCV debug window
+    camera_index: 0          # dipakai di cv2.VideoCapture
+    px_to_mm_ref: 0.1        # scaling lebar bbox YOLO → diameter mm (sementara)
 
     # Main timing + frame
-    publish_rate_hz: 5.0
-    frame_id: "robot_base"
+    publish_rate_hz: 5.0     # hanya untuk publish /vision/centers (timer dummy)
+    frame_id: "robot_base"   # frame untuk CupcakeCenters dan VisionQuality
 
     # Dummy centers used for publishing /vision/centers
     # (x1, y1, z1, x2, y2, z2, x3, y3, z3)
     centers_m:
-      - 0.18   # cup 1 x
-      - 0.05   # cup 1 y
+      - 0.18    # cup 1 x
+      - 0.05    # cup 1 y
       - -0.15   # cup 1 z
-      - 0.18   # cup 2 x
-      - 0.00   # cup 2 y
+      - 0.18    # cup 2 x
+      - 0.00    # cup 2 y
       - -0.13   # cup 2 z
-      - 0.18   # cup 3 x
-      - -0.05  # cup 3 y
+      - 0.18    # cup 3 x
+      - -0.05   # cup 3 y
       - -0.09   # cup 3 z
 
-    # Target diameter (for 3 cupcakes) in mm
+    # Target diameter (untuk 3 cupcakes) dalam mm
     diameter_mean_mm:
       - 30.0
       - 30.0
       - 30.0
 
-    # If max(d) - min(d) > tol → needs_human = True
+    # Jika max(d) - min(d) > tol → needs_human = True
     quality_tolerance_mm: 3.0
-
