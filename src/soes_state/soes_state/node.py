@@ -291,7 +291,7 @@ class StateNode(Node):
         # CAMERA LOGIC
         # ===============================
         elif self.phase == Phase.CAMERA:
-            # tidak log "CAMERA Phase ON" setiap tick lagi
+            self.get_logger().info("CAMERA Log ON")
 
             # 1. A result arrived
             if self.vision_done is not None:
