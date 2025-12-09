@@ -30,5 +30,3 @@ soes_vision:
 
     # Jika max(d) - min(d) > tol → needs_human = True
     quality_tolerance_mm: 3.0
-
-    visualize: true
