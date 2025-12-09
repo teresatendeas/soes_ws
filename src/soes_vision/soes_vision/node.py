@@ -6,13 +6,11 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import Point
 from soes_msgs.msg import CupcakeCenters, VisionQuality
 
-# ===== Added imports for vision pipeline =====
 import cv2
 import numpy as np
-import matplotlib.pyplot as plt
 from std_msgs.msg import Bool
 
-# ===== NEW: YOLO (Ultralytics) support =====
+# ===== YOLO (Ultralytics) support =====
 try:
     from ultralytics import YOLO as UltralyticsYOLO
     _HAS_YOLO = True
@@ -45,6 +43,7 @@ def load_yolo_model(
 
     return _YOLO_MODEL
 
+
 class VisionNode(Node):
     def __init__(self):
         super().__init__('soes_vision')
@@ -75,39 +74,55 @@ class VisionNode(Node):
         self.cam_index = int(self.get_parameter('camera_index').value)
         self.px_to_mm_ref = float(self.get_parameter('px_to_mm_ref').value)
 
-        qos = QoSProfile(depth=10,
-                         reliability=ReliabilityPolicy.RELIABLE,
-                         history=HistoryPolicy.KEEP_LAST)
-        self.centers_pub = self.create_publisher(CupcakeCenters,
-                                                 '/vision/centers', qos)
-        self.quality_pub = self.create_publisher(VisionQuality,
-                                                 '/vision/quality', qos)
-        self.soess_done_pub = self.create_publisher(Bool, '/vision/soes_done', qos)
+        qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST
+        )
 
-        self.request_sub = self.create_subscription(Bool, '/vision/request',
-                                                    self._on_request, qos)
+        self.centers_pub = self.create_publisher(
+            CupcakeCenters, '/vision/centers', qos
+        )
+        self.quality_pub = self.create_publisher(
+            VisionQuality, '/vision/quality', qos
+        )
+        self.soess_done_pub = self.create_publisher(
+            Bool, '/vision/soes_done', qos
+        )
 
-        # ------------------------------------------------------------------
-        #   🔥 FIX PART 1 — OPEN CAMERA ONCE (persistent)
-        # ------------------------------------------------------------------
+        self.request_sub = self.create_subscription(
+            Bool, '/vision/request', self._on_request, qos
+        )
+
+        # ---------- Kamera: buka sekali ----------
         self.cap = cv2.VideoCapture(self.cam_index)
-        
         if not self.cap.isOpened():
-            self.get_logger().error(f"Camera index {self.cam_index} failed to open!")
+            self.get_logger().error(
+                f"Camera index {self.cam_index} failed to open!"
+            )
             self.cap = None
         else:
             self.get_logger().info("Camera opened ONCE at startup.")
-        # ------------------------------------------------------------------
 
+        # ---------- YOLO: load sekali di awal ----------
+        self.get_logger().info("YOLO: starting initial model load...")
+        load_yolo_model()
+        self.get_logger().info("YOLO: initial model load done.")
+
+        # Dummy k untuk centers (kalau mau animasi dikit)
         self.k = 0
-        self.timer = self.create_timer(max(0.001, 1.0/self.rate),
-                                       self._on_timer)
-        self.get_logger().info('soes_vision started (dummy publishers).')
+
+        # Timer hanya untuk publish CENTERS / info statis
+        self.timer = self.create_timer(
+            max(0.001, 1.0 / self.rate),
+            self._on_timer
+        )
+        self.get_logger().info('soes_vision started.')
 
     def _on_timer(self):
         now = self.get_clock().now().to_msg()
 
-        # centers message
+        # centers message (boleh tetap dummy / statis)
         msg_c = CupcakeCenters()
         msg_c.header.stamp = now
         msg_c.header.frame_id = self.frame_id
@@ -120,47 +135,33 @@ class VisionNode(Node):
             msg_c.centers.append(p)
         self.centers_pub.publish(msg_c)
 
-        d0 = self.diam_mean[0] + 1.0 * math.sin(self.k * 0.20)
-        d1 = self.diam_mean[1] + 0.5 * math.sin(self.k * 0.15 + 1.0)
-        d2 = self.diam_mean[2] + 0.7 * math.sin(self.k * 0.18 + 2.0)
-
-        msg_q = VisionQuality()
-        msg_q.header.stamp = now
-        msg_q.diameter_mm = [float(d0), float(d1), float(d2)]
-        msg_q.score = [1.0, 1.0, 1.0]
-        msg_q.needs_human = (
-            max(msg_q.diameter_mm) - min(msg_q.diameter_mm)
-        ) > self.tol
-        self.quality_pub.publish(msg_q)
-
-        soes_done_msg = Bool()
-        soes_done_msg.data = (not msg_q.needs_human)
-        self.soess_done_pub.publish(soes_done_msg)
-
+        # Tidak publish VisionQuality atau soes_done di timer lagi
         self.k += 1
 
-    # ----------------------------------------------------------------------
-    #   🔥 FIX PART 2 — USE PERSISTENT CAMERA INSTEAD OF OPENING EACH TIME
-    # ----------------------------------------------------------------------
     def _on_request(self, msg: Bool):
-        self.get_logger().info("YOLO: Starting model load...")
-        load_yolo_model()
-        self.get_logger().info("YOLO: Model load complete.")
+        self.get_logger().info("VISION REQUEST: running YOLO on one frame...")
 
-        # Persistent camera read
+        # Pastikan model sudah ada
+        model = load_yolo_model()
+        if model is None:
+            self.get_logger().warn(
+                "YOLO model not available, you may want to use fallback here."
+            )
+
+        # Pastikan kamera ready
         if self.cap is None or not self.cap.isOpened():
             self.get_logger().error("Camera not opened, cannot capture frame.")
             return
 
         ret, frame = self.cap.read()
         if not ret or frame is None:
-            self.get_logger().error("Failed to read frame from persistent camera.")
+            self.get_logger().error("Failed to read frame from camera.")
             return
-        # ----------------------------------------------------------------------
 
-        # Run detection
+        # Run detection (YOLO atau fallback)
         vis, good_cnts, yolo_labels = detect_choux_from_frame(frame)
 
+        # Estimasi diameter per cupcake
         diam_mm = []
         for i in range(len(self.diam_mean)):
             if i < len(yolo_labels):
@@ -171,14 +172,18 @@ class VisionNode(Node):
             else:
                 diam_mm.append(float(self.diam_mean[i]))
 
+        # Quality message
         msg_q = VisionQuality()
         msg_q.header.stamp = self.get_clock().now().to_msg()
         msg_q.diameter_mm = [float(x) for x in diam_mm]
         msg_q.score = [1.0] * len(diam_mm)
-        msg_q.needs_human = (max(msg_q.diameter_mm) - min(msg_q.diameter_mm)) > self.tol
+        msg_q.needs_human = (
+            max(msg_q.diameter_mm) - min(msg_q.diameter_mm)
+        ) > self.tol
 
         self.quality_pub.publish(msg_q)
 
+        # soes_done = True kalau tidak perlu human
         soes_done_msg = Bool()
         soes_done_msg.data = (not msg_q.needs_human)
         self.soess_done_pub.publish(soes_done_msg)
@@ -188,8 +193,8 @@ class VisionNode(Node):
         else:
             self.get_logger().info('VISION (on-request): needs_human == False')
 
-# ---------------- remainder unchanged (helpers, detection, main) ----------------
-# (same as your original file, no modifications)
+
+# ===== helper dan main sama seperti file kamu =====
 
 def draw_detected(img, cnts, color=(0, 255, 0)):
     out = img.copy()
@@ -203,19 +208,19 @@ def draw_detected(img, cnts, color=(0, 255, 0)):
 
 
 def _detect_choux_color_fallback(img):
-    # unchanged
+    # isi sesuai file kamu sebelumnya
     ...
     return vis, good, yolo_labels
 
 
 def detect_choux_from_frame(img):
-    # unchanged
+    # isi sesuai file kamu sebelumnya
     ...
     return vis, good, yolo_labels
 
 
 def debug_detect_choux_from_usb(cam_index=0):
-    # unchanged
+    # isi sesuai file kamu sebelumnya
     ...
 
 
