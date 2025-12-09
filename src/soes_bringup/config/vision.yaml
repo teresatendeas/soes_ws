@@ -19,10 +19,10 @@ soes_vision:
       - 0.18   # cup 1 x
       - 0.05   # cup 1 y
       - -0.15   # cup 1 z
-      - 0.18   # cup 2 x
+      - 0.17   # cup 2 x
       - 0.00   # cup 2 y
       - -0.15   # cup 2 z
-      - 0.18   # cup 3 x
+      - 0.16   # cup 3 x
       - -0.05  # cup 3 y
       - -0.15   # cup 3 z
 
