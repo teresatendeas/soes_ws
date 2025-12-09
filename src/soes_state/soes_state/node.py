@@ -35,7 +35,8 @@ class StateNode(Node):
         self.declare_parameter('roller_distance_mm', 100.0)
         self.declare_parameter('roller_speed_mm_s', 40.0)
 
-        self.declare_parameter('camera_timeout_s', 2.0)
+        # camera timeout dinaikkan jadi 5 detik
+        self.declare_parameter('camera_timeout_s', 5.0)
 
         # also use settle_before_pump_s as "arm_home_settle_s"
         self.t_settle   = float(self.get_parameter('settle_before_pump_s').value)
@@ -96,10 +97,10 @@ class StateNode(Node):
         # ---------- Vision request + soes_done ----------
         self.vision_request_pub = self.create_publisher(Bool, '/vision/request', 1)
 
-        # NEW: store detection result
+        # store detection result
         self.vision_done = None
 
-        # NEW: subscribe to result
+        # subscribe to result
         self.create_subscription(
             Bool,
             '/vision/soes_done',
@@ -150,7 +151,7 @@ class StateNode(Node):
             req.data = True
             self.vision_request_pub.publish(req)
 
-            self.get_logger().info('Requested vision detection (vision/request).')
+            self.get_logger().info('CAMERA: sent /vision/request = True, waiting /vision/soes_done')
 
         self.get_logger().info(f'[STATE] -> {self.phase.name}')
         self._publish_phase()
@@ -287,10 +288,10 @@ class StateNode(Node):
                 self._enter(Phase.INIT_POS)
 
         # ===============================
-        # NEW CAMERA LOGIC (Full patch)
+        # CAMERA LOGIC
         # ===============================
         elif self.phase == Phase.CAMERA:
-            self.get_logger().info("CAMERA Phase ON")
+            # tidak log "CAMERA Phase ON" setiap tick lagi
 
             # 1. A result arrived
             if self.vision_done is not None:
@@ -309,7 +310,7 @@ class StateNode(Node):
                 return
 
         # ------------------------------
-        # ROLL_TRAY (unchanged)
+        # ROLL_TRAY
         # ------------------------------
         elif self.phase == Phase.ROLL_TRAY:
             roll_time = self.roll_dist / max(self.roll_speed, 1e-3)
