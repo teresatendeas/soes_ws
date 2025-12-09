@@ -231,6 +231,14 @@ class VisionNode(Node):
         self.get_logger().info("Running detection (YOLO or fallback)")
         vis, good_cnts, yolo_labels = detect_choux_from_frame(frame)
 
+        # ===== ADDED: handle case when no choux detected =====
+        no_choux = (len(good_cnts) == 0 and len(yolo_labels) == 0)  # <<< ADDED
+        if no_choux:  # <<< ADDED
+            self.get_logger().error(  # <<< ADDED
+                "VISION (on-request): no choux detected in frame. Human inspection required."
+            )  # <<< ADDED
+        # =====================================================
+
         diam_mm = []
         for i in range(len(self.diam_mean)):
             if i < len(yolo_labels):
@@ -253,11 +261,19 @@ class VisionNode(Node):
         msg_q.header.stamp = self.get_clock().now().to_msg()
         msg_q.diameter_mm = [float(x) for x in diam_mm]
         msg_q.score = [1.0] * len(diam_mm)
-        msg_q.needs_human = (
-            max(msg_q.diameter_mm) - min(msg_q.diameter_mm)
-        ) > self.tol
 
-        self.get_logger().info(f"Publishing VisionQuality: diam_mm={msg_q.diameter_mm}, needs_human={msg_q.needs_human}")
+        # ===== MODIFIED: force needs_human True when no choux =====
+        if no_choux:  # <<< ADDED
+            msg_q.needs_human = True  # <<< ADDED
+        else:  # <<< ADDED
+            msg_q.needs_human = (  # <<< MOVED INTO ELSE
+                max(msg_q.diameter_mm) - min(msg_q.diameter_mm)
+            ) > self.tol
+        # =========================================================
+
+        self.get_logger().info(
+            f"Publishing VisionQuality: diam_mm={msg_q.diameter_mm}, needs_human={msg_q.needs_human}"
+        )
         self.quality_pub.publish(msg_q)
 
         soes_done_msg = Bool()
