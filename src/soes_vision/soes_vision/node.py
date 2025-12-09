@@ -166,7 +166,7 @@ class VisionNode(Node):
         self.get_logger().debug(f"Timer incremented k={self.k}")
 
     def _on_vis_timer(self):
-        """Visualisasi YOLO live sejak start."""
+        """Live camera view sejak start, TANPA YOLO di timer (ringan)."""
         self.get_logger().debug("Entering _on_vis_timer")
         if not self.visualize:
             self.get_logger().debug("Visualize parameter is False, skipping visualization")
@@ -180,10 +180,10 @@ class VisionNode(Node):
             self.get_logger().warn("Failed to read frame from camera for visualization.")
             return
 
-        self.get_logger().debug("Calling detect_choux_from_frame for visualization")
-        vis, _, _ = detect_choux_from_frame(frame)
-        self.get_logger().debug("Overlaying CAMERA phase text on frame")
+        # Tidak panggil YOLO di sini supaya tidak block node lain.
+        vis = frame.copy()
 
+        self.get_logger().debug("Overlaying CAMERA phase text on frame")
         text = f"CAMERA Phase = {self.camera_phase}"
         cv2.putText(
             vis,
@@ -232,11 +232,11 @@ class VisionNode(Node):
         vis, good_cnts, yolo_labels = detect_choux_from_frame(frame)
 
         # ===== ADDED: handle case when no choux detected =====
-        no_choux = (len(good_cnts) == 0 and len(yolo_labels) == 0)  # <<< ADDED
-        if no_choux:  # <<< ADDED
-            self.get_logger().error(  # <<< ADDED
+        no_choux = (len(good_cnts) == 0 and len(yolo_labels) == 0)
+        if no_choux:
+            self.get_logger().error(
                 "VISION (on-request): no choux detected in frame. Human inspection required."
-            )  # <<< ADDED
+            )
         # =====================================================
 
         diam_mm = []
@@ -263,10 +263,10 @@ class VisionNode(Node):
         msg_q.score = [1.0] * len(diam_mm)
 
         # ===== MODIFIED: force needs_human True when no choux =====
-        if no_choux:  # <<< ADDED
-            msg_q.needs_human = True  # <<< ADDED
-        else:  # <<< ADDED
-            msg_q.needs_human = (  # <<< MOVED INTO ELSE
+        if no_choux:
+            msg_q.needs_human = True
+        else:
+            msg_q.needs_human = (
                 max(msg_q.diameter_mm) - min(msg_q.diameter_mm)
             ) > self.tol
         # =========================================================
