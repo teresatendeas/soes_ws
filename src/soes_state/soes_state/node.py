@@ -295,6 +295,7 @@ class StateNode(Node):
 
             # 1. A result arrived
             if self.vision_done is not None:
+                self.get_logger().info("Vision is done")
                 if self.vision_done:
                     self.get_logger().info("Vision OK → ROLL_TRAY")
                     self._enter(Phase.ROLL_TRAY)
