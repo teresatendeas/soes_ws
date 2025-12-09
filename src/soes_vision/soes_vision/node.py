@@ -32,17 +32,18 @@ def load_yolo_model(
         return None
 
     if _YOLO_MODEL is not None:
+        print("[YOLO] Model already loaded, reusing cached model.")
         return _YOLO_MODEL
 
+    print("[YOLO] Loading model (this may take a few seconds)...")
     try:
         _YOLO_MODEL = UltralyticsYOLO(model_path)
-        print(f"[YOLO] Loaded model from: {model_path}")
+        print(f"[YOLO] Model loaded successfully from: {model_path}")
     except Exception as e:
         print(f"[YOLO] Failed to load model: {e}")
         _YOLO_MODEL = None
 
     return _YOLO_MODEL
-
 
 class VisionNode(Node):
     def __init__(self):
@@ -142,7 +143,9 @@ class VisionNode(Node):
     #   🔥 FIX PART 2 — USE PERSISTENT CAMERA INSTEAD OF OPENING EACH TIME
     # ----------------------------------------------------------------------
     def _on_request(self, msg: Bool):
+        self.get_logger().info("YOLO: Starting model load...")
         load_yolo_model()
+        self.get_logger().info("YOLO: Model load complete.")
 
         # Persistent camera read
         if self.cap is None or not self.cap.isOpened():
