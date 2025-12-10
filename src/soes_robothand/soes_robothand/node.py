@@ -321,9 +321,23 @@ class RoboHandNode(Node):
 
         # HOME
         if self.phase == Phase.HOME:
-            # S-curve on the way back to HOME
-            speed_scale = self._s_curve_speed(self.home_T)
-            self._home_step(speed_scale=speed_scale)
+            # not_home: cek apakah EE masih jauh dari HOME
+            des_xyz_home = self.fk_xyz(self.q_home)
+            cur_xyz = self.fk_xyz(self.q)
+            not_home = np.linalg.norm(des_xyz_home - cur_xyz) > self.pos_tol
+
+            if not_home:
+                # S-curve on the way back to HOME
+                speed_scale = self._s_curve_speed(self.home_T)
+                self._home_step(speed_scale=speed_scale)
+            else:
+                # Sudah di HOME, stay still
+                self._publish_targets(self.q, np.zeros_like(self.q), use_velocity=False)
+                self._publish_at(True)
+                if not self._home_done_logged:
+                    self.get_logger().info("[ROBOHAND] Already at init pos (HOME)")
+                    self._home_done_logged = True
+
             self._publish_swirl(False)
             return
 
