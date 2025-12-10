@@ -79,7 +79,10 @@ class StateNode(Node):
         self.create_subscription(Bool, '/arm/at_target', self._on_at_target, 10)
 
         # subscribe to /esp_switch_on sebagai RESET button
-        self.switch_on = False
+        # ASUMSI: HIGH = tidak ditekan, LOW = ditekan
+        # CHANGED: default kita anggap HIGH (True), supaya awalnya IDLE
+        self.switch_on = True  # CHANGED: assume HIGH at startup
+
         self.create_subscription(Bool, '/esp_switch_on', self._on_switch, 10)
 
         # subscribe to /arm/swirl_active to control pump
@@ -109,7 +112,8 @@ class StateNode(Node):
         )
 
         # ---------- Runtime ----------
-        self.phase = Phase.INIT_POS
+        # CHANGED: mulai di IDLE, bukan INIT_POS
+        self.phase = Phase.IDLE          # CHANGED
         self.phase_t0 = self.get_clock().now()
         self.quality_flag = False
         self._step_idx = 0
@@ -121,11 +125,11 @@ class StateNode(Node):
 
         # 20 Hz tick
         self.timer = self.create_timer(0.05, self.tick)
-        self.get_logger().info('soes_state: ready (INIT_POS).')
+        self.get_logger().info('soes_state: ready (IDLE, waiting RESET LOW).')  # CHANGED
 
-        # Tell robothand to go HOME
-        self._publish_index(-1)
-        self._publish_phase()
+        # CHANGED: awalnya TIDAK suruh robothand ke HOME.
+        # Jadi robot benar-benar diam sampai tombol reset LOW.
+        self._publish_phase()  # CHANGED: hanya publish phase
 
     # ---------- Vision done callback ----------
     def _on_vision_done(self, msg: Bool):
@@ -200,22 +204,35 @@ class StateNode(Node):
             self.arm_at_since = None
 
     def _on_switch(self, msg: Bool):
+        """
+        /esp_switch_on:
+        - True  = HIGH (tombol tidak ditekan)
+        - False = LOW  (tombol ditekan)
+
+        Yang diminta:
+        - Saat LOW (tekan)  -> mulai dari INIT_POS
+        - Saat HIGH awal    -> tetap IDLE
+        """
         prev = self.switch_on
         self.switch_on = bool(msg.data)
 
-        if not prev and self.switch_on:
-            self.get_logger().warn('ESP reset -> INIT_POS.')
+        # HIGH -> LOW : tombol ditekan -> RESET & mulai sequence dari INIT_POS
+        if prev and not self.switch_on:
+            self.get_logger().warn('RESET pressed (HIGH -> LOW) -> INIT_POS.')
             self.pump.stop()
             self._roller_cmd(False)
             self.swirl_active = False
             self.arm_at = False
             self.arm_at_since = None
-            self._publish_index(-1)
             self._step_idx = 0
+
+            # Suruh robothand ke HOME dari INIT_POS
+            self._publish_index(-1)
             self._enter(Phase.INIT_POS)
 
-        elif prev and not self.switch_on:
-            self.get_logger().warn('ESP released -> IDLE.')
+        # LOW -> HIGH : tombol dilepas -> kembali ke IDLE
+        elif (not prev) and self.switch_on:
+            self.get_logger().warn('RESET released (LOW -> HIGH) -> IDLE.')
             self.pump.stop()
             self._roller_cmd(False)
             self._publish_index(-1)
