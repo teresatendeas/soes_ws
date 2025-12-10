@@ -58,7 +58,7 @@ class RoboHandNode(Node):
         self.declare_parameter('height', 0.04)
         self.declare_parameter('omega', 0.5)  # rad/s
 
-        # -------- NEW: S-curve profile times (for HOME and MOVE) --------
+        # -------- S-curve profile times --------
         self.declare_parameter('move_profile_time_s', 1.0)
         self.declare_parameter('home_profile_time_s', 1.0)
 
@@ -89,7 +89,7 @@ class RoboHandNode(Node):
         self.theta_max = 2.0 * math.pi * self.turns
         self.s = (self.height / self.theta_max) if self.theta_max != 0.0 else 0.0
 
-        # NEW: profile durations
+        # profile durations
         self.move_T = float(self.get_parameter('move_profile_time_s').value)
         self.home_T = float(self.get_parameter('home_profile_time_s').value)
 
@@ -101,12 +101,14 @@ class RoboHandNode(Node):
         self.at_pub      = self.create_publisher(Bool, '/arm/at_target', 1)
         self.swirl_pub   = self.create_publisher(Bool, '/arm/swirl_active', 1)
 
-        # NEW: subscribe to /esp_paused to freeze this node too
+        # pause dari ESP
         self.paused = False
         self.create_subscription(Bool, '/esp_paused', self._on_paused, 10)
 
         # -------- Runtime --------
         self.q: np.ndarray = np.zeros(4, dtype=float)
+        self.qdot_last: np.ndarray = np.zeros(4, dtype=float)  # untuk ramp down halus di WAIT
+
         self.active_index: int = -1
         self.centers: Optional[List[Tuple[float,float,float]]] = None
 
@@ -120,7 +122,7 @@ class RoboHandNode(Node):
         self.spiral_center: Optional[np.ndarray] = None
 
         # Logging helpers
-        self._home_done_logged = False  # ensure "arrived HOME" logged once
+        self._home_done_logged = False
 
         self.timer = self.create_timer(self.dt, self._tick)
         self.get_logger().info('soes_robothand: HOME first, then MOVE/SWIRL on index.')
@@ -145,16 +147,13 @@ class RoboHandNode(Node):
             self._align_phase_with_index()
 
     def _on_paused(self, msg: Bool):
-        """Freeze arm control loop when ESP pause is active."""
         self.paused = bool(msg.data)
 
     # ------------- Phase selection -------------
     def _align_phase_with_index(self):
-        # Moving to init pos (HOME)
         if self.active_index == -1:
             self.get_logger().info("[ROBOHAND] Moving to init pos (HOME)")
             self._enter(Phase.HOME, None)
-        # Moving to one of the cupcake positions
         elif self.active_index in (0, 1, 2) and self.centers and len(self.centers) >= 3:
             label = f"pos{self.active_index + 1}"
             self.get_logger().info(f"[ROBOHAND] Moving to {label}")
@@ -170,7 +169,7 @@ class RoboHandNode(Node):
         self.last_within_tol = None
         self.des_xyz = xyz.copy() if xyz is not None else None
 
-        # Reset HOME arrival logging when entering HOME
+        # reset log HOME
         if new_phase == Phase.HOME:
             self._home_done_logged = False
 
@@ -187,7 +186,7 @@ class RoboHandNode(Node):
     def _elapsed(self) -> float:
         return (self.get_clock().now() - self.phase_t0).nanoseconds * 1e-9
 
-    # ------------- NEW: S-curve speed scaling -------------
+    # ------------- S-curve speed scaling -------------
     def _s_curve_speed(self, profile_T: float) -> float:
         if profile_T <= 0.0:
             return 1.0
@@ -238,11 +237,13 @@ class RoboHandNode(Node):
     def _publish_swirl(self, active: bool):
         self.swirl_pub.publish(Bool(data=bool(active)))
 
-    # === NEW: hold last pose in WAIT ===
+    # === HOLD current pose di WAIT, smoothing vel -> 0 ===
     def _hold_current_pose(self):
-        """Kirim command posisi sekarang dengan velocity 0, posisi-mode."""
-        qdot_zero = np.zeros_like(self.q)
-        self._publish_targets(self.q, qdot_zero, use_velocity=True)
+        """Tahan pose: decay velocity pelan ke nol di velocity-mode."""
+        # exponential decay, bisa kamu tune (0.95 lebih halus, 0.8 lebih cepat)
+        self.qdot_last *= 0.90
+        qdot = self.qdot_last.copy()
+        self._publish_targets(self.q, qdot, use_velocity=True)
 
     def _home_step(self, speed_scale: float = 1.0) -> bool:
         des_xyz_home = self.fk_xyz(self.q_home)
@@ -280,6 +281,9 @@ class RoboHandNode(Node):
         qdot = np.clip(qdot, -limit, limit)
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
 
+        # simpan untuk decay di WAIT
+        self.qdot_last = qdot.copy()
+
         self._publish_targets(self.q, qdot, use_velocity=True)
 
         at = (
@@ -313,7 +317,7 @@ class RoboHandNode(Node):
             self._publish_swirl(False)
             return
 
-        # WAIT: hold last pose
+        # WAIT: hold pose dengan ramp down vel
         if self.phase == Phase.WAIT:
             self._hold_current_pose()
             self._publish_at(False)
