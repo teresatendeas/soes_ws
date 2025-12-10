@@ -231,6 +231,15 @@ class VisionNode(Node):
         self.get_logger().info("Running detection (YOLO or fallback)")
         vis, good_cnts, yolo_labels = detect_choux_from_frame(frame)
 
+        # ===== Tampilkan 1 frame hasil prediksi =====
+        try:
+            self.get_logger().debug("Showing YOLO result frame")
+            cv2.imshow("soes_vision_result", vis)
+            cv2.waitKey(1)
+        except Exception as e:
+            self.get_logger().warn(f"OpenCV imshow (result) failed: {e}")
+        # ============================================
+
         # ===== ADDED: handle case when no choux detected =====
         no_choux = (len(good_cnts) == 0 and len(yolo_labels) == 0)
         if no_choux:
@@ -388,36 +397,6 @@ def detect_choux_from_frame(img):
 
     print("[detect_choux_from_frame] Done. Returning visual, good, yolo_labels.")
     return vis, good, yolo_labels
-
-def debug_detect_choux_from_usb(cam_index=0):
-    """Debug langsung dari USB cam tanpa ROS."""
-    print("[debug_detect_choux_from_usb] Opening camera for debug...")
-    cap = cv2.VideoCapture(cam_index)
-    if not cap.isOpened():
-        print(f"[DEBUG] Failed to open camera index {cam_index}")
-        return
-
-    load_yolo_model()
-    print("[DEBUG] Press ESC or q to quit debug window.")
-
-    while True:
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            print("[DEBUG] Failed to read frame, stopping.")
-            break
-
-        print("[debug_detect_choux_from_usb] Detecting choux from frame...")
-        vis, good, labels = detect_choux_from_frame(frame)
-        cv2.imshow("soes_vision debug", vis)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == 27 or key == ord('q'):
-            print("[debug_detect_choux_from_usb] Quit key pressed, exiting.")
-            break
-
-    print("[debug_detect_choux_from_usb] Releasing camera and destroying windows.")
-    cap.release()
-    cv2.destroyAllWindows()
 
 
 def main():
