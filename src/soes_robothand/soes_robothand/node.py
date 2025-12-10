@@ -242,7 +242,7 @@ class RoboHandNode(Node):
     def _hold_current_pose(self):
         """Kirim command posisi sekarang dengan velocity 0, posisi-mode."""
         qdot_zero = np.zeros_like(self.q)
-        self._publish_targets(self.q, qdot_zero, use_velocity=False)
+        self._publish_targets(self.q, qdot_zero, use_velocity=True)
 
     def _home_step(self, speed_scale: float = 1.0) -> bool:
         des_xyz_home = self.fk_xyz(self.q_home)
