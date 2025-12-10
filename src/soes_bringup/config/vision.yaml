@@ -20,7 +20,7 @@ soes_vision:
       - -0.13   # cup 2 z
       - 0.20    # cup 3 x
       - -0.05   # cup 3 y
-      - -0.08   # cup 3 z
+      - -0.15   # cup 3 z
 
     # Target diameter (untuk 3 cupcakes) dalam mm
     diameter_mean_mm:
