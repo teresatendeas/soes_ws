@@ -138,6 +138,7 @@ class StateNode(Node):
 
     # ---------- Helpers ----------
     def _enter(self, new_phase: Phase):
+        old_phase = self.phase    # simpan state lama dulu
         self.phase = new_phase
         self.phase_t0 = self.get_clock().now()
         self._did_start_pump = False
@@ -147,18 +148,21 @@ class StateNode(Node):
             self._roller_active = False
             self._roller_duration_s = 0.0
 
-        # If we enter CAMERA phase, request detection
+        # Vision request jika CAMERA
         if new_phase == Phase.CAMERA:
             self.vision_done = None
-
             req = Bool()
             req.data = True
             self.vision_request_pub.publish(req)
-
             self.get_logger().info('CAMERA: sent /vision/request = True, waiting /vision/soes_done')
 
+        # ========== LOG STATE OVERALL ==========
+        self.get_logger().warn(f'[OVERALL] {old_phase.name} → {new_phase.name}')
+        # =======================================
+        
         self.get_logger().info(f'[STATE] -> {self.phase.name}')
         self._publish_phase()
+
 
     def _elapsed(self) -> float:
         return (self.get_clock().now() - self.phase_t0).nanoseconds * 1e-9
