@@ -59,7 +59,6 @@ class RoboHandNode(Node):
         self.declare_parameter('omega', 0.5)  # rad/s
 
         # -------- NEW: S-curve profile times (for HOME and MOVE) --------
-        # These control how long the S-curve ramp takes. Tune in YAML.
         self.declare_parameter('move_profile_time_s', 1.0)
         self.declare_parameter('home_profile_time_s', 1.0)
 
@@ -100,7 +99,7 @@ class RoboHandNode(Node):
         self.center_sub  = self.create_subscription(CupcakeCenters, '/vision/centers', self._on_centers, qos)
         self.targets_pub = self.create_publisher(JointTargets, '/arm/joint_targets', 10)
         self.at_pub      = self.create_publisher(Bool, '/arm/at_target', 1)
-        self.swirl_pub   = self.create_publisher(Bool, '/arm/swirl_active', 1)   # already used by StateNode
+        self.swirl_pub   = self.create_publisher(Bool, '/arm/swirl_active', 1)
 
         # NEW: subscribe to /esp_paused to freeze this node too
         self.paused = False
@@ -164,7 +163,6 @@ class RoboHandNode(Node):
             self._enter(Phase.WAIT, None)
 
     def _enter(self, new_phase: Phase, xyz: Optional[np.ndarray]):
-        # --- NEW: log sekali saat phase benar-benar berubah ---
         old_phase = self.phase
 
         self.phase = new_phase
@@ -191,20 +189,14 @@ class RoboHandNode(Node):
 
     # ------------- NEW: S-curve speed scaling -------------
     def _s_curve_speed(self, profile_T: float) -> float:
-        """
-        Smooth S-curve-like speed factor in [0.1, 1].
-        Uses the derivative of a smoothstep (4*tau*(1-tau)) as a bell-shaped profile.
-        """
         if profile_T <= 0.0:
             return 1.0
         t = self._elapsed()
-        tau = max(0.0, min(t / profile_T, 1.0))  # 0..1
-        # Bell-shaped curve: 0 at start/end, 1 at middle
+        tau = max(0.0, min(t / profile_T, 1.0))
         scale = 4.0 * tau * (1.0 - tau)
-        # Avoid fully zero -> keep at least 0.1 so the arm still moves
         return max(scale, 0.1)
 
-    # ------------- Analytic FK & J (your model) -------------
+    # ------------- Analytic FK & J -------------
     def fk_xyz(self, q: np.ndarray) -> np.ndarray:
         q1, q2, q3, q4 = q
         L1, L2, L3, L4 = self.L1, self.L2, self.L3, self.L4
@@ -244,22 +236,22 @@ class RoboHandNode(Node):
         self.at_pub.publish(Bool(data=bool(is_at)))
 
     def _publish_swirl(self, active: bool):
-        """Tell StateNode whether we are in SWIRL phase or not."""
         self.swirl_pub.publish(Bool(data=bool(active)))
 
+    # === NEW: hold last pose in WAIT ===
+    def _hold_current_pose(self):
+        """Kirim command posisi sekarang dengan velocity 0, posisi-mode."""
+        qdot_zero = np.zeros_like(self.q)
+        self._publish_targets(self.q, qdot_zero, use_velocity=False)
+
     def _home_step(self, speed_scale: float = 1.0) -> bool:
-        """Home motion in task space using the same IK servo as _ik_step."""
-        # Desired EE pose = FK of joint-space home configuration
         des_xyz_home = self.fk_xyz(self.q_home)
-    
-        # Reuse the Cartesian IK step logic (Jacobian-based)
         at = self._ik_step(des_xyz_home, xdot_ff=None, speed_scale=speed_scale)
-    
-        # Optionally log once when HOME (based on IK 'at' flag)
+
         if at and not self._home_done_logged:
             self.get_logger().info("[ROBOHAND] Arrived at init pos (HOME)")
             self._home_done_logged = True
-    
+
         return at
 
     def _ik_step(
@@ -268,7 +260,6 @@ class RoboHandNode(Node):
         xdot_ff: Optional[np.ndarray] = None,
         speed_scale: float = 1.0
     ) -> bool:
-        """Cartesian IK step with S-curve speed scaling on joint velocity limits."""
         cur_xyz = self.fk_xyz(self.q)
         err = des_xyz - cur_xyz
         if np.linalg.norm(err) <= self.pos_tol:
@@ -285,7 +276,6 @@ class RoboHandNode(Node):
         JJt = J @ J.T
         qdot = J.T @ np.linalg.solve(JJt + (self.lmbda**2) * np.eye(3), v)
 
-        # Apply S-curve speed scaling to joint velocity limits
         limit = self.qdot_lim * speed_scale
         qdot = np.clip(qdot, -limit, limit)
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
@@ -302,7 +292,6 @@ class RoboHandNode(Node):
 
     # ------------- Phase logic -------------
     def _start_swirl(self):
-        # prepare spiral about current center
         if self.centers is None or self.active_index not in (0,1,2):
             return
 
@@ -314,28 +303,25 @@ class RoboHandNode(Node):
         self._enter(Phase.SWIRL, self.spiral_center.copy())
 
     def _tick(self):
-        # ======== GLOBAL PAUSE GATING ========
         if self.paused:
-            # Do not update q, spiral_theta, or publish new commands while paused.
             return
 
         # HOME
         if self.phase == Phase.HOME:
-            # S-curve on the way back to HOME
             speed_scale = self._s_curve_speed(self.home_T)
             self._home_step(speed_scale=speed_scale)
             self._publish_swirl(False)
             return
 
-        # WAIT
+        # WAIT: hold last pose
         if self.phase == Phase.WAIT:
+            self._hold_current_pose()
             self._publish_at(False)
             self._publish_swirl(False)
             return
 
         # MOVE
         if self.phase == Phase.MOVE and self.des_xyz is not None:
-            # S-curve for move from init_pos -> swirl start
             speed_scale = self._s_curve_speed(self.move_T)
             at = self._ik_step(self.des_xyz, speed_scale=speed_scale)
             if at:
@@ -350,21 +336,18 @@ class RoboHandNode(Node):
                 self._publish_swirl(False)
                 return
 
-            # Spiral pose
             r = self.R0 * (1.0 + self.alpha * self.spiral_theta)
             dx = r * math.cos(self.spiral_theta)
             dy = r * math.sin(self.spiral_theta)
-            dz = self.s * self.spiral_theta   # linear height with theta
+            dz = self.s * self.spiral_theta
             des = self.spiral_center + np.array([dx, dy, dz])
 
-            # Spiral feedforward (helps tracking)
             rdot = self.R0 * self.alpha * self.omega
             xdot = rdot * math.cos(self.spiral_theta) - r * self.omega * math.sin(self.spiral_theta)
             ydot = rdot * math.sin(self.spiral_theta) + r * self.omega * math.cos(self.spiral_theta)
             zdot = self.s * self.omega
             ff = np.array([xdot, ydot, zdot])
 
-            # SWIRL: keep full speed for now (speed_scale=1.0)
             self._ik_step(des, ff, speed_scale=1.0)
             self.spiral_theta += self.omega * self.dt
 
@@ -372,10 +355,10 @@ class RoboHandNode(Node):
                 label = f"pos{self.active_index + 1}" if self.active_index in (0,1,2) else "current position"
                 self.get_logger().info(f"[SWIRL] Swirl done at {label}")
                 self._enter(Phase.WAIT, None)
-                self._publish_swirl(False)   # SWIRL ended
+                self._publish_swirl(False)
             else:
                 self.get_logger().debug("[SWIRL] Active")
-                self._publish_swirl(True)    # still swirling
+                self._publish_swirl(True)
             return
 
         # default
