@@ -17,7 +17,7 @@ class Phase(enum.Enum):
     HOME  = 0    # joint-space home (index = -1)
     WAIT  = 1    # idle until /state/active_index changes
     MOVE  = 2    # go to center i (Cartesian target)
-    SWIRL = 3    # generate spiral about center i
+    SWIRL = 3    # generate spiral about that center
 
 
 class RoboHandNode(Node):
@@ -32,11 +32,11 @@ class RoboHandNode(Node):
 
         # -------- Control rate & tolerances --------
         self.declare_parameter('rate_hz', 20.0)
-        self.declare_parameter('pos_tol_m', 0.003)    # Cartesian tol
-        self.declare_parameter('settle_s', 0.20)      # dwell inside tol before declaring "at target"
+        self.declare_parameter('pos_tol_m', 0.003)
+        self.declare_parameter('settle_s', 0.20)
 
         # -------- Geometry (L1..L4) --------
-        self.declare_parameter('link_lengths_m', [0.00, 0.14, 0.12, 0.04])  # [L1,L2,L3,L4]
+        self.declare_parameter('link_lengths_m', [0.00, 0.14, 0.12, 0.04])
 
         # -------- tuning --------
         self.declare_parameter('kp_cart', 3.0)
@@ -46,17 +46,16 @@ class RoboHandNode(Node):
         self.declare_parameter('q_max_rad', [ math.pi,  math.pi/2,  math.pi/2,  math.pi/2])
 
         # -------- HOME (joint space) --------
-        self.declare_parameter('q_home_rad', [0.0, 0.0, 0.0, 0.0])  # set this to a safe ready pose
-        self.declare_parameter('kp_joint', 3.0)                     # joint homing gain
-        self.declare_parameter('home_tol_rad', 0.02)                # ~1.1°
+        self.declare_parameter('q_home_rad', [0.0, 0.0, 0.0, 0.0])
+        self.declare_parameter('kp_joint', 3.0)
+        self.declare_parameter('home_tol_rad', 0.02)
 
         # -------- Spiral parameters --------
-        # r(θ) = R0 * (1 + α θ), z(θ) = (height / θ_max) * θ,  θ̇ = ω
         self.declare_parameter('R0', 0.025)
         self.declare_parameter('turns', 3)
         self.declare_parameter('alpha', -0.03)
         self.declare_parameter('height', 0.04)
-        self.declare_parameter('omega', 0.5)  # rad/s
+        self.declare_parameter('omega', 0.5)
 
         # -------- S-curve profile times --------
         self.declare_parameter('move_profile_time_s', 1.0)
@@ -89,25 +88,25 @@ class RoboHandNode(Node):
         self.theta_max = 2.0 * math.pi * self.turns
         self.s = (self.height / self.theta_max) if self.theta_max != 0.0 else 0.0
 
-        # profile durations
         self.move_T = float(self.get_parameter('move_profile_time_s').value)
         self.home_T = float(self.get_parameter('home_profile_time_s').value)
 
         # -------- ROS I/O --------
-        qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST)
+        qos = QoSProfile(depth=10,
+                         reliability=ReliabilityPolicy.RELIABLE,
+                         history=HistoryPolicy.KEEP_LAST)
         self.index_sub   = self.create_subscription(Int32, '/state/active_index', self._on_index, 10)
         self.center_sub  = self.create_subscription(CupcakeCenters, '/vision/centers', self._on_centers, qos)
         self.targets_pub = self.create_publisher(JointTargets, '/arm/joint_targets', 10)
         self.at_pub      = self.create_publisher(Bool, '/arm/at_target', 1)
         self.swirl_pub   = self.create_publisher(Bool, '/arm/swirl_active', 1)
 
-        # pause dari ESP
         self.paused = False
         self.create_subscription(Bool, '/esp_paused', self._on_paused, 10)
 
         # -------- Runtime --------
         self.q: np.ndarray = np.zeros(4, dtype=float)
-        self.qdot_last: np.ndarray = np.zeros(4, dtype=float)  # untuk ramp down halus di WAIT
+        self.qdot_last: np.ndarray = np.zeros(4, dtype=float)  # buat smoothing start/stop
 
         self.active_index: int = -1
         self.centers: Optional[List[Tuple[float,float,float]]] = None
@@ -117,11 +116,9 @@ class RoboHandNode(Node):
         self.last_within_tol = None
         self.des_xyz: Optional[np.ndarray] = None
 
-        # Spiral bookkeeping
         self.spiral_theta = 0.0
         self.spiral_center: Optional[np.ndarray] = None
 
-        # Logging helpers
         self._home_done_logged = False
 
         self.timer = self.create_timer(self.dt, self._tick)
@@ -169,7 +166,6 @@ class RoboHandNode(Node):
         self.last_within_tol = None
         self.des_xyz = xyz.copy() if xyz is not None else None
 
-        # reset log HOME
         if new_phase == Phase.HOME:
             self._home_done_logged = False
 
@@ -237,10 +233,9 @@ class RoboHandNode(Node):
     def _publish_swirl(self, active: bool):
         self.swirl_pub.publish(Bool(data=bool(active)))
 
-    # === HOLD current pose di WAIT, smoothing vel -> 0 ===
+    # HOLD current pose di WAIT, smoothing vel -> 0
     def _hold_current_pose(self):
         """Tahan pose: decay velocity pelan ke nol di velocity-mode."""
-        # exponential decay, bisa kamu tune (0.95 lebih halus, 0.8 lebih cepat)
         self.qdot_last *= 0.90
         qdot = self.qdot_last.copy()
         self._publish_targets(self.q, qdot, use_velocity=True)
@@ -275,13 +270,17 @@ class RoboHandNode(Node):
 
         J = self.jacobian(self.q)
         JJt = J @ J.T
-        qdot = J.T @ np.linalg.solve(JJt + (self.lmbda**2) * np.eye(3), v)
+        qdot_ik = J.T @ np.linalg.solve(JJt + (self.lmbda**2) * np.eye(3), v)
+
+        # low-pass filter qdot untuk halusin start
+        alpha = 0.3  # 0.3–0.5, bisa kamu tune
+        qdot = alpha * qdot_ik + (1.0 - alpha) * self.qdot_last
 
         limit = self.qdot_lim * speed_scale
         qdot = np.clip(qdot, -limit, limit)
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
 
-        # simpan untuk decay di WAIT
+        # simpan untuk WAIT dan step berikutnya
         self.qdot_last = qdot.copy()
 
         self._publish_targets(self.q, qdot, use_velocity=True)
