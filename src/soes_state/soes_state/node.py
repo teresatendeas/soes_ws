@@ -205,7 +205,7 @@ class StateNode(Node):
         """
         # --- DEFINE YOUR SAFE POST_STEP POSE HERE ---
         # Example (tune these to your robot):
-        q_safe = [-0.0, -34, 1571, 502]   # <--- Cari Logging terakhir angle, terus naikin heightnya
+        q_safe = [-0.0, -34.0, 1571.0, 502.0]   # <--- Cari Logging terakhir angle, terus naikin heightnya
     
         jt = JointTargets()
         jt.position = q_safe
