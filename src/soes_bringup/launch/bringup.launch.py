@@ -16,13 +16,6 @@ def generate_launch_description():
             parameters=[os.path.join(cfg, 'state.yaml')],
         ),
         Node(
-            package='soes_robothand',
-            executable='robothand_node',
-            name='soes_robothand',
-            output='screen',
-            parameters=[os.path.join(cfg, 'robothand.yaml')],
-        ),
-        Node(
             package='soes_vision',
             executable='vision_node',
             name='soes_vision',
