@@ -87,7 +87,7 @@ class VisionNode(Node):
         self.quality_pub = self.create_publisher(VisionQuality, '/vision/quality', qos)
         self.soess_done_pub = self.create_publisher(Bool, '/vision/soes_done', qos)
 
-        # Subscriber (Vision Code)
+        # subscriber
         self.request_sub = self.create_subscription(
             Bool,
             '/vision/request',
@@ -100,9 +100,15 @@ class VisionNode(Node):
         if not self.cap.isOpened():
             self.get_logger().error(f"Camera index {self.cam_index} failed to open!")
             self.cap = None
+        else:
+            self.get_logger().info(f"Camera opened on index {self.cam_index}")
 
         # load YOLO once
-        load_yolo_model()
+        model = load_yolo_model()
+        if model is None:
+            self.get_logger().warn("[VISION] YOLO not available, using color fallback.")
+        else:
+            self.get_logger().info("[VISION] YOLO model loaded successfully.")
 
         # main timer
         self.timer = self.create_timer(max(0.001, 1.0 / self.rate), self._on_timer)
@@ -111,6 +117,7 @@ class VisionNode(Node):
         self.vis_timer = None
         if self.visualize:
             self.vis_timer = self.create_timer(0.1, self._on_vis_timer)
+            self.get_logger().info("[VISION] Visualization timer enabled.")
 
         self.get_logger().info('soes_vision started.')
 
@@ -161,6 +168,7 @@ class VisionNode(Node):
 
     # -------------- request handler → detect once --------------
     def _on_request(self, msg: Bool):
+        self.get_logger().info(f"[VISION] /vision/request received: {msg.data}")
         self.camera_phase = True
 
         model = load_yolo_model()
@@ -175,7 +183,12 @@ class VisionNode(Node):
             self.camera_phase = False
             return
 
+        self.get_logger().info("[VISION] Running choux detection on request frame.")
         vis, good_cnts, yolo_labels = detect_choux_from_frame(frame)
+
+        self.get_logger().info(
+            f"[VISION] Detection result: {len(good_cnts)} contours, {len(yolo_labels)} YOLO boxes."
+        )
 
         # no choux detected
         no_choux = (len(good_cnts) == 0 and len(yolo_labels) == 0)
@@ -193,6 +206,8 @@ class VisionNode(Node):
             else:
                 diam_mm.append(float(self.diam_mean[i]))
 
+        self.get_logger().info(f"[VISION] Estimated diameters (mm): {diam_mm}")
+
         msg_q = VisionQuality()
         msg_q.header.stamp = self.get_clock().now().to_msg()
         msg_q.diameter_mm = [float(x) for x in diam_mm]
@@ -203,16 +218,25 @@ class VisionNode(Node):
         else:
             msg_q.needs_human = (max(msg_q.diameter_mm) - min(msg_q.diameter_mm)) > self.tol
 
+        self.get_logger().info(
+            f"[VISION] needs_human = {msg_q.needs_human}, "
+            f"range = {max(msg_q.diameter_mm) - min(msg_q.diameter_mm):.2f} mm, "
+            f"tol = {self.tol:.2f} mm"
+        )
+
         self.quality_pub.publish(msg_q)
 
         soes_done_msg = Bool()
         soes_done_msg.data = (not msg_q.needs_human)
         self.soess_done_pub.publish(soes_done_msg)
 
+        self.get_logger().info(f"[VISION] Published /vision/soes_done = {soes_done_msg.data}")
+
         self.camera_phase = False
 
     # -------------- cleanup --------------
     def destroy_node(self):
+        self.get_logger().info("[VISION] Shutting down vision node, releasing camera and windows.")
         if self.cap is not None:
             self.cap.release()
         try:
@@ -232,6 +256,7 @@ def draw_detected(img, cnts, color=(0, 255, 0)):
         cv2.circle(out, center, r, color, 3)
         cv2.putText(out, f"Choux {i}", (center[0] - 40, center[1] - r - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        # tidak perlu logging per contour supaya tidak spam
     return out
 
 
