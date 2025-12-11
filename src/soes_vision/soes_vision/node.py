@@ -53,9 +53,12 @@ class VisionNode(Node):
         # -------- parameters --------
         self.declare_parameter('publish_rate_hz', 5.0)
         self.declare_parameter('frame_id', 'robot_base')
-        self.declare_parameter('centers_m', [0.22, 0.05, 0.10,
-                                             0.20, 0.00, 0.10,
-                                             0.22, -0.05, 0.10])
+        self.declare_parameter(
+            'centers_m',
+            [0.22, 0.05, 0.10,
+             0.20, 0.00, 0.10,
+             0.22, -0.05, 0.10]
+        )
         self.declare_parameter('diameter_mean_mm', [30.0, 30.0, 30.0])
         self.declare_parameter('quality_tolerance_mm', 3.0)
         self.declare_parameter('camera_index', 0)
@@ -134,7 +137,7 @@ class VisionNode(Node):
         self.vis_timer = None
         if self.visualize:
             self.get_logger().info("Step: create visualization timer")
-            # 10 Hz visualisasi
+            # 10 Hz visualisasi + YOLO
             self.vis_timer = self.create_timer(0.1, self._on_vis_timer)
 
         self.get_logger().info('soes_vision started (init done).')
@@ -166,7 +169,7 @@ class VisionNode(Node):
         self.get_logger().debug(f"Timer incremented k={self.k}")
 
     def _on_vis_timer(self):
-        """Live camera view sejak start, TANPA YOLO di timer (ringan)."""
+        """Live camera view sejak start, dengan YOLO untuk overlay visual."""
         self.get_logger().debug("Entering _on_vis_timer")
         if not self.visualize:
             self.get_logger().debug("Visualize parameter is False, skipping visualization")
@@ -180,9 +183,15 @@ class VisionNode(Node):
             self.get_logger().warn("Failed to read frame from camera for visualization.")
             return
 
-        # Tidak panggil YOLO di sini supaya tidak block node lain.
-        vis = frame.copy()
+        # Jalankan YOLO / fallback untuk visualisasi dari awal
+        try:
+            self.get_logger().debug("Running detect_choux_from_frame for visualization")
+            vis, good_cnts, yolo_labels = detect_choux_from_frame(frame)
+        except Exception as e:
+            self.get_logger().warn(f"detect_choux_from_frame failed in vis_timer: {e}")
+            vis = frame.copy()
 
+        # Overlay text CAMERA phase di hasil deteksi
         self.get_logger().debug("Overlaying CAMERA phase text on frame")
         text = f"CAMERA Phase = {self.camera_phase}"
         cv2.putText(
