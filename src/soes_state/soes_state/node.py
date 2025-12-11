@@ -378,10 +378,13 @@ class StateNode(Node):
                         self._start_step(1)
 
                     elif self._step_idx == 2:
+                        self._start_step(2)
+
+                    else:
                         self.get_logger().info("All steps done -> POST_STEP")
-                        self._step_idx = -1
                         self._publish_index(-1)
                         self._enter(Phase.POST_STEP)
+
 
         elif self.phase == Phase.STEP0:
             if self._run_step():
