@@ -100,7 +100,6 @@ class StateNode(Node):
         self.last_phase: Phase = Phase.IDLE
 
         self.active_index: int = -1      # cup index; -1 = HOME
-        # ambil order dari parameter
         order_param = self.get_parameter("order").get_parameter_value()
         self.order: List[int] = list(order_param.integer_array_value) or [0, 1, 2]
 
@@ -147,7 +146,6 @@ class StateNode(Node):
         switch_on = msg.data
 
         if self.last_switch_on is None:
-            # first time, cuma simpan state dan kalau ON langsung start
             self.last_switch_on = switch_on
             if switch_on:
                 self.get_logger().info("[STATE] ESP switch ON (initial) -> start sequence.")
@@ -172,7 +170,6 @@ class StateNode(Node):
         self.last_switch_on = switch_on
 
     def _on_esp_paused(self, msg: Bool):
-        # hardware pause dari ESP
         self.esp_paused = msg.data
         if self.esp_paused:
             self.get_logger().warn("[STATE] ESP paused -> freezing state machine + traj")
@@ -190,7 +187,6 @@ class StateNode(Node):
     # ==================== Start / Reset helpers ====================
 
     def _do_start_sequence(self):
-        # mulai dari INIT_POS
         self.phase = Phase.INIT_POS
         self.active_index = -1
         self.traj = None
@@ -201,7 +197,6 @@ class StateNode(Node):
         self._publish_phase()
 
     def _do_reset_to_idle(self):
-        # stop dan IDLE, tidak langsung start lagi
         self.phase = Phase.IDLE
         self.active_index = -1
         self.traj = None
@@ -210,19 +205,20 @@ class StateNode(Node):
         self._roller_off()
         self._settle_until = None
         self._pump_on_until = None
+
+        # supaya klik ON berikutnya selalu dianggap start baru
+        self.last_switch_on = False
+
         self._publish_phase()
 
     # ==================== Main timer ====================
 
     def _on_timer(self):
-        # Kalau ESP pause, freeze semua logic state / traj
         if self.esp_paused:
             return
 
-        # update joint following traj
         self._step_trajectory()
 
-        # step high-level phase machine
         if self.phase == Phase.IDLE:
             self._step_idle()
         elif self.phase == Phase.INIT_POS:
@@ -243,7 +239,6 @@ class StateNode(Node):
     # ==================== Phase helpers ====================
 
     def _step_idle(self):
-        # di IDLE, robot tetap di posisi sekarang
         pass
 
     def _step_init_pos(self):
@@ -260,7 +255,6 @@ class StateNode(Node):
 
         now = self.get_clock().now()
 
-        # Sampai di cup, tunggu settle lalu nyalakan pump dan swirl
         if self._settle_until is None:
             settle_s = float(self.get_parameter("settle_before_pump_s").value)
             self._settle_until = now + Duration(seconds=settle_s)
@@ -270,7 +264,6 @@ class StateNode(Node):
         if now < self._settle_until:
             return
 
-        # settle selesai, nyalakan pump dan swirl
         if self._pump_on_until is None:
             pump_s = float(self.get_parameter("pump_on_s").value)
             self._pump_on(now, pump_s)
@@ -278,16 +271,13 @@ class StateNode(Node):
             self.get_logger().info(f"[STATE] STEP{order_idx}: pump ON + swirl.")
             return
 
-        # cek apakah pump sudah selesai
         if now < self._pump_on_until:
             return
 
-        # Pump selesai
         self._pump_off()
         self._settle_until = None
         self._pump_on_until = None
 
-        # Lanjut ke cup berikut atau ke next_phase
         if order_idx + 1 < len(self.order):
             self.phase = Phase(Phase.STEP0.value + order_idx + 1)
             self.active_index = self.order[order_idx + 1]
@@ -314,14 +304,13 @@ class StateNode(Node):
         if self.latest_quality is None:
             return
 
-        # sesuaikan field dengan definisi VisionQuality kamu
-        if getattr(self.latest_quality, "ok", False):
-            self.get_logger().info("[STATE] CAMERA: quality OK, go to ROLL_TRAY.")
+        # VisionQuality dari vision node: needs_human == True kalau jelek
+        if not self.latest_quality.needs_human:
+            self.get_logger().info("[STATE] CAMERA: quality OK (needs_human=False), go to ROLL_TRAY.")
             self.phase = Phase.ROLL_TRAY
             self._publish_phase()
 
     def _step_roll_tray(self):
-        # RollerCmd di I2CBridge pakai field 'on' saja
         cmd = RollerCmd()
         cmd.on = True
         self.pub_roller.publish(cmd)
@@ -331,7 +320,6 @@ class StateNode(Node):
         self._publish_phase()
 
     def _step_test_motor(self):
-        # Mode untuk test motor manual (kalau kamu pakai)
         pass
 
     # ==================== Trajectory + joint targets ====================
@@ -347,7 +335,6 @@ class StateNode(Node):
         self.q_current = q.copy()
         self.traj_index += 1
 
-        # publish JointTargets ke I2C bridge
         msg = JointTargets()
         msg.position = [float(v) for v in q]
         msg.velocity = [0.0, 0.0, 0.0, 0.0]
@@ -357,30 +344,7 @@ class StateNode(Node):
         self._plan_joint_traj(self.q_current, self.q_home)
 
     def _plan_move_to_cup(self, idx: int):
-        if self.latest_centers is None:
-            self.get_logger().warn("[STATE] No centers from vision, using dummy center.")
-            x, y, z = 0.18, 0.0, -0.13
-        else:
-            # Sesuaikan field dengan CupcakeCenters kamu
-            if idx == 0:
-                x, y, z = (
-                    self.latest_centers.c1.x,
-                    self.latest_centers.c1.y,
-                    self.latest_centers.c1.z,
-                )
-            elif idx == 1:
-                x, y, z = (
-                    self.latest_centers.c2.x,
-                    self.latest_centers.c2.y,
-                    self.latest_centers.c2.z,
-                )
-            else:
-                x, y, z = (
-                    self.latest_centers.c3.x,
-                    self.latest_centers.c3.y,
-                    self.latest_centers.c3.z,
-                )
-
+        x, y, z = self._get_center_xyz(idx)
         q_target = self._ik_cartesian_target(x, y, z)
         if q_target is None:
             self.get_logger().error(f"[STATE] IK failed for cup {idx}.")
@@ -397,7 +361,6 @@ class StateNode(Node):
         for i in range(steps):
             t = i / max(steps - 1, 1)
             q[i, :] = q_start
-            # putar joint-4 sekitar 180 derajat bolak balik
             q[i, 3] = q_start[3] + math.radians(180.0) * math.sin(math.pi * t)
 
         self.traj = q
@@ -429,13 +392,11 @@ class StateNode(Node):
         l3 = float(self.get_parameter("link_l3_m").value)
         tool_offset = float(self.get_parameter("tool_offset_m").value)
 
-        # yaw
         q0 = math.atan2(y, x)
 
         r = math.sqrt(x * x + y * y)
         z_eff = z + tool_offset
 
-        # treat l2 + l3 as satu link
         L = l2 + l3
 
         D = (r * r + z_eff * z_eff - l1 * l1 - L * L) / (2.0 * l1 * L)
@@ -443,17 +404,39 @@ class StateNode(Node):
             self.get_logger().error(f"[IK] Unreachable: D={D:.3f}")
             return None
 
-        q2 = math.acos(D)  # elbow
+        q2 = math.acos(D)
         alpha = math.atan2(z_eff, r)
         beta = math.atan2(L * math.sin(q2), l1 + L * math.cos(q2))
         q1 = alpha - beta
 
-        # q3: servo topping center 90 deg
         q3_center_deg = 90.0
         q3 = math.radians(q3_center_deg)
 
         q = np.array([q0, q1, q2, q3], dtype=float)
         return q
+
+    # ==================== Center helper (sesuai VisionNode) ====================
+
+    def _get_center_xyz(self, idx: int):
+        """
+        Ambil (x,y,z) dari CupcakeCenters.centers[idx] (VisionNode).
+        Kalau belum ada data atau index kurang, pakai dummy.
+        """
+        default_xyz = (0.18, 0.0, -0.13)
+
+        if self.latest_centers is None:
+            self.get_logger().warn("[STATE] No centers from vision, using dummy center.")
+            return default_xyz
+
+        centers = list(self.latest_centers.centers)
+        if idx < 0 or idx >= len(centers):
+            self.get_logger().warn(
+                f"[STATE] Cup index {idx} out of range (len={len(centers)}). Using dummy center."
+            )
+            return default_xyz
+
+        p = centers[idx]
+        return (float(p.x), float(p.y), float(p.z))
 
     # ==================== Pump & roller ====================
 
