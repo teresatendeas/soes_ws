@@ -322,6 +322,8 @@ class StateNode(Node):
         elif self.phase == Phase.STEP2:
             if self._run_step():
                 self.get_logger().info("STEP2 → POST_STEP")
+                self._step_idx = -1    # <-- IMPORTANT: advance the index
+                self._publish_index(-1)
                 self._enter(Phase.POST_STEP)
 
         # ------------------------------
