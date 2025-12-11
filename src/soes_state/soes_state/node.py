@@ -644,44 +644,14 @@ class StateNode(Node):
         self.arm_pub.publish(msg)
 
     def _home_step(self, speed_scale: float = 1.0) -> bool:
-        """
-        Home motion di joint space menuju q_home.
-        Beda dari versi lama yang pakai IK ke fk(q_home).
-        """
-        # error di joint space
-        err_q = self.q_home - self.q
-
-        # cek sudah dekat home atau belum (pakai norm error joint)
-        if np.linalg.norm(err_q) <= self.home_tol:
-            if self.last_within_tol is None:
-                self.last_within_tol = self.get_clock().now()
-        else:
-            self.last_within_tol = None
-
-        # kecepatan joint (P control)
-        qdot = self.kp_joint * err_q
-
-        # batasi kecepatan + scaling S-curve
-        limit = self.qdot_lim * speed_scale
-        qdot = np.clip(qdot, -limit, limit)
-
-        # integrasi ke posisi joint
-        self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
-
-        # kirim command ke ESP (mode velocity)
-        self._publish_targets(self.q, qdot, use_velocity=True)
-
-        at = (
-            self.last_within_tol is not None
-            and (self.get_clock().now() - self.last_within_tol)
-            >= Duration(seconds=self.settle_s)
-        )
+        """Home motion di task space pakai IK yang sama."""
+        des_xyz_home = self.fk_xyz(self.q_home)
+        at = self._ik_step(des_xyz_home, xdot_ff=None, speed_scale=speed_scale)
 
         if at and not self._home_done_logged:
             self.get_logger().info("[ROBOHAND] Arrived at init pos (HOME)")
             self._home_done_logged = True
 
-        self._set_arm_at(at)
         return at
 
     def _ik_step(
