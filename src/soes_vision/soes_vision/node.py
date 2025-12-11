@@ -155,14 +155,36 @@ class VisionNode(Node):
         except Exception as e:
             self.get_logger().warn(f"detect_choux_from_frame failed in vis_timer: {e}")
             vis = frame.copy()
+            yolo_labels = []
 
-        # HAPUS overlay CAMERA Phase di pojok kiri atas  # <<< CHANGED
+        # ===== highlight 3 top choux in BLUE =====    # <<< CHANGED
+        if len(yolo_labels) > 0:
+            # sort by cy ascending (paling atas dulu)
+            top3 = sorted(yolo_labels, key=lambda t: t[2])[:3]
+
+            for (_, cx, cy, w, h) in top3:
+                cx_i = int(cx)
+                cy_i = int(cy)
+                r = int(max(w, h) / 2.0)
+                r = max(r, 5)
+
+                # BLUE highlight
+                cv2.circle(vis, (cx_i, cy_i), r, (255, 0, 0), 3)
+                cv2.putText(
+                    vis, "TOP",
+                    (cx_i - 20, cy_i - r - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (255, 0, 0),
+                    2
+                )
 
         try:
             cv2.imshow("soes_vision", vis)
             cv2.waitKey(1)
         except Exception:
             pass
+
 
     # -------------- request handler → detect once --------------
     def _on_request(self, msg: Bool):
