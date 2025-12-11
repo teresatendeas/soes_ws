@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import enum
 import math
-from typing import Optional, Tuple, List
+from typing import Optional, List
 
 import numpy as np
 import rclpy
@@ -60,7 +60,7 @@ class StateNode(Node):
         self.declare_parameter("use_vision", True)
         self.declare_parameter("vision_timeout_s", 3.0)
 
-        # QoS
+        # Publikasi
         qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
@@ -71,20 +71,23 @@ class StateNode(Node):
         self.pub_phase = self.create_publisher(Int32, "/state/phase", 10)
         self.pub_active_index = self.create_publisher(Int32, "/state/active_index", 10)
 
+        # ke I2C bridge (harus cocok dengan I2CBridge.on_joint)
         self.pub_joint_targets = self.create_publisher(JointTargets, "/arm/joint_targets", qos)
+
+        # ke I2C bridge (harus cocok dengan I2CBridge.on_pump / on_roller)
         self.pub_pump = self.create_publisher(PumpCmd, "/pump/cmd", qos)
         self.pub_roller = self.create_publisher(RollerCmd, "/roller/cmd", qos)
 
         # ---------- Subscribers ----------
+        # UI / logic high-level
         self.sub_start = self.create_subscription(
             Bool, "/state/start", self._on_start, 10
         )
         self.sub_reset = self.create_subscription(
             Bool, "/state/reset", self._on_reset, 10
         )
-        self.sub_pause = self.create_subscription(
-            Bool, "/state/pause", self._on_pause, 10
-        )
+
+        # Vision
         self.sub_vision_centers = self.create_subscription(
             CupcakeCenters, "/vision/centers", self._on_vision_centers, qos
         )
@@ -92,23 +95,25 @@ class StateNode(Node):
             VisionQuality, "/vision/quality", self._on_vision_quality, qos
         )
 
+        # Pause dari ESP (I2CBridge)
+        self.sub_esp_paused = self.create_subscription(
+            Bool, "/esp_paused", self._on_esp_paused, 10
+        )
+
         # ---------- Internal state ----------
         self.phase: Phase = Phase.IDLE
         self.last_phase: Phase = Phase.IDLE
 
         self.active_index: int = -1      # cup index; -1 = HOME
-        self.order: List[int] = (
-            self.get_parameter("order")
-            .get_parameter_value()
-            .integer_array_value
-        )
-        if len(self.order) == 0:
-            self.order = [0, 1, 2]
+        # ambil order dari parameter
+        order_param = self.get_parameter("order").get_parameter_value()
+        self.order: List[int] = list(order_param.integer_array_value) or [0, 1, 2]
 
-        # flags kontrol
-        self._has_started: bool = False   # pernah start sequence
+        self._has_started: bool = False
         self._reset_requested: bool = False
-        self._paused: bool = False        # sedang pause atau tidak
+
+        # flag pause dari ESP
+        self.esp_paused: bool = False
 
         # robot joint state (rad)
         q_home_deg = self.get_parameter("q_home_deg").value
@@ -142,17 +147,16 @@ class StateNode(Node):
         if not msg.data:
             return
 
-        # Jika sedang pause dan sequence sudah jalan, ini artinya RESUME
-        if self._paused and self._has_started:
-            self._paused = False
-            self.get_logger().info("[STATE] Resume from pause.")
+        # Kalau masih jalan (bukan IDLE), jangan restart
+        if self.phase != Phase.IDLE:
+            self.get_logger().warn(
+                f"[STATE] Start received but phase={self.phase.name} (not IDLE). Ignoring."
+            )
             return
 
-        # Start normal: mulai ulang sequence dari awal
-        self.get_logger().info("[STATE] Start sequence requested (fresh).")
+        self.get_logger().info("[STATE] Start sequence requested.")
         self._has_started = True
         self._reset_requested = False
-        self._paused = False
         self.phase = Phase.INIT_POS
         self.active_index = -1
         self._plan_home()
@@ -162,31 +166,21 @@ class StateNode(Node):
         if not msg.data:
             return
 
-        self.get_logger().info("[STATE] Reset requested.")
+        self.get_logger().warn("[STATE] Reset requested.")
         self._reset_requested = True
         self._has_started = False
-        self._paused = False
-
         self.phase = Phase.IDLE
         self.active_index = -1
+
+        # clear traj
         self.traj = None
         self.traj_index = 0
+
+        # matikan aktuator
         self._pump_off()
-        self._roller_stop()
+        self._roller_off()
+
         self._publish_phase()
-
-    def _on_pause(self, msg: Bool):
-        if not msg.data:
-            return
-
-        # Pause hanya masuk akal kalau sudah pernah start
-        if not self._has_started:
-            self.get_logger().warn("[STATE] Pause requested but sequence not started yet.")
-            return
-
-        if not self._paused:
-            self._paused = True
-            self.get_logger().info("[STATE] Pause requested. Trajectory and phase stepping halted.")
 
     def _on_vision_centers(self, msg: CupcakeCenters):
         self.latest_centers = msg
@@ -196,11 +190,19 @@ class StateNode(Node):
         self.latest_quality = msg
         self.last_vision_stamp = self.get_clock().now()
 
+    def _on_esp_paused(self, msg: Bool):
+        # hardware pause dari ESP
+        self.esp_paused = msg.data
+        if self.esp_paused:
+            self.get_logger().warn("[STATE] ESP paused -> freezing state machine + traj")
+        else:
+            self.get_logger().info("[STATE] ESP resumed -> continuing state machine")
+
     # ==================== Main timer ====================
 
     def _on_timer(self):
-        # Jika pause, jangan update apa pun
-        if self._paused:
+        # Kalau ESP pause, freeze semua logic state / traj
+        if self.esp_paused:
             return
 
         # update joint following traj
@@ -242,8 +244,9 @@ class StateNode(Node):
         if self._trajectory_active():
             return
 
-        # Sampai di cup, tunggu settle lalu nyalakan pump dan swirl
         now = self.get_clock().now()
+
+        # Sampai di cup, tunggu settle lalu nyalakan pump dan swirl
         if self._settle_until is None:
             settle_s = float(self.get_parameter("settle_before_pump_s").value)
             self._settle_until = now + Duration(seconds=settle_s)
@@ -253,7 +256,7 @@ class StateNode(Node):
         if now < self._settle_until:
             return
 
-        # settle selesai, nyalakan pump + swirl
+        # settle selesai, nyalakan pump dan swirl
         if self._pump_on_until is None:
             pump_s = float(self.get_parameter("pump_on_s").value)
             self._pump_on(now, pump_s)
@@ -287,7 +290,6 @@ class StateNode(Node):
             self._plan_home()
 
     def _step_camera(self):
-        # Di sini kamu bisa pakai vision untuk koreksi posisi tray, dsb
         use_vision = bool(self.get_parameter("use_vision").value)
         if not use_vision:
             self.get_logger().info("[STATE] CAMERA: vision disabled, go to ROLL_TRAY.")
@@ -298,25 +300,20 @@ class StateNode(Node):
         if self.latest_quality is None:
             return
 
-        # Sesuaikan field 'ok' dengan definisi VisionQuality kamu
+        # sesuaikan field dengan definisi VisionQuality kamu
         if getattr(self.latest_quality, "ok", False):
             self.get_logger().info("[STATE] CAMERA: quality OK, go to ROLL_TRAY.")
             self.phase = Phase.ROLL_TRAY
             self._publish_phase()
 
     def _step_roll_tray(self):
-        # Contoh: gerakkan roller untuk keluarin tray
+        # RollerCmd di I2CBridge pakai field 'on' saja
         cmd = RollerCmd()
-        cmd.speed_mm_s = 30.0
-        cmd.distance_mm = 150.0
-        cmd.relative = True
+        cmd.on = True
         self.pub_roller.publish(cmd)
-        self.get_logger().info("[STATE] ROLL_TRAY: send roller cmd, then IDLE.")
 
-        # Sequence selesai
+        self.get_logger().info("[STATE] ROLL_TRAY: send roller ON, then IDLE.")
         self.phase = Phase.IDLE
-        self._has_started = False
-        self._paused = False
         self._publish_phase()
 
     def _step_test_motor(self):
@@ -338,9 +335,9 @@ class StateNode(Node):
 
         # publish JointTargets ke I2C bridge
         msg = JointTargets()
-        msg.use_velocity = False
-        msg.pos_rad = list(q)
-        msg.vel_rads = [0.0, 0.0, 0.0, 0.0]
+        # I2CBridge.on_joint mengharapkan 'position' dan opsional 'velocity'
+        msg.position = list(float(v) for v in q)
+        msg.velocity = [0.0, 0.0, 0.0, 0.0]
         self.pub_joint_targets.publish(msg)
 
     def _plan_home(self):
@@ -349,10 +346,9 @@ class StateNode(Node):
     def _plan_move_to_cup(self, idx: int):
         if self.latest_centers is None:
             self.get_logger().warn("[STATE] No centers from vision, using dummy center.")
-            # Jika belum ada vision, kamu bisa pakai table center di parameter
             x, y, z = 0.18, 0.0, -0.13
         else:
-            # Sesuaikan dengan definisi CupcakeCenters kamu
+            # Sesuaikan field dengan CupcakeCenters kamu
             if idx == 0:
                 x, y, z = (
                     self.latest_centers.c1.x,
@@ -380,7 +376,6 @@ class StateNode(Node):
         self._plan_joint_traj(self.q_current, q_target)
 
     def _plan_swirl_about_current_cup(self):
-        # Contoh swirl sederhana di joint-space:
         swirl_time = float(self.get_parameter("swirl_time_s").value)
         steps = max(1, int(swirl_time / self.dt))
 
@@ -400,7 +395,6 @@ class StateNode(Node):
         max_speed = np.radians(max_speed_deg)
 
         dq = np.abs(q_goal - q_start)
-        # hindari pembagian nol
         t_needed = np.max(dq / np.maximum(max_speed, 1e-3))
         t_needed = max(t_needed, self.dt)
         steps = max(2, int(t_needed / self.dt))
@@ -408,7 +402,6 @@ class StateNode(Node):
         q = np.zeros((steps, 4))
         for i in range(steps):
             s = i / (steps - 1)
-            # S-curve simple (smoothstep)
             s_smooth = s * s * (3.0 - 2.0 * s)
             q[i, :] = q_start + s_smooth * (q_goal - q_start)
 
@@ -418,12 +411,6 @@ class StateNode(Node):
     # ==================== IK ====================
 
     def _ik_cartesian_target(self, x: float, y: float, z: float) -> Optional[np.ndarray]:
-        """
-        IK sederhana:
-        q0 = atan2(y, x)
-        gunakan planar 2-link di (r, z) untuk q1, q2
-        q3 = servo/topping, di-offset supaya 90 deg = center
-        """
         l1 = float(self.get_parameter("link_l1_m").value)
         l2 = float(self.get_parameter("link_l2_m").value)
         l3 = float(self.get_parameter("link_l3_m").value)
@@ -444,12 +431,11 @@ class StateNode(Node):
             return None
 
         q2 = math.acos(D)  # elbow
-        # shoulder
         alpha = math.atan2(z_eff, r)
         beta = math.atan2(L * math.sin(q2), l1 + L * math.cos(q2))
         q1 = alpha - beta
 
-        # q3: servo untuk tilt topping. 90 deg = center
+        # q3: servo topping center 90 deg
         q3_center_deg = 90.0
         q3 = math.radians(q3_center_deg)
 
@@ -469,13 +455,10 @@ class StateNode(Node):
         cmd.on = False
         self.pub_pump.publish(cmd)
         self._pump_on_until = None
-        self.pub_pump.publish(cmd)
 
-    def _roller_stop(self):
+    def _roller_off(self):
         cmd = RollerCmd()
-        cmd.speed_mm_s = 0.0
-        cmd.distance_mm = 0.0
-        cmd.relative = False
+        cmd.on = False
         self.pub_roller.publish(cmd)
 
     # ==================== Utils ====================
