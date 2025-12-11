@@ -385,7 +385,6 @@ class StateNode(Node):
                         self._publish_index(-1)
                         self._enter(Phase.POST_STEP)
 
-
         elif self.phase == Phase.STEP0:
             if self._run_step():
                 self.get_logger().info("STEP0 → STEP1")
@@ -401,8 +400,11 @@ class StateNode(Node):
                 self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.STEP2:
-            # sekarang STEP2 selesai -> sudah ditangani di INIT_POS / POST_STEP jalur di atas
-            pass
+            if self._run_step():
+                self.get_logger().info("STEP2 done -> INIT_POS before CAMERA")
+                self._step_idx = 3
+                self._publish_index(-1)
+                self._enter(Phase.INIT_POS)
 
         # POST_STEP: cukup tunggu HOME settle lalu masuk CAMERA
         elif self.phase == Phase.POST_STEP:
