@@ -79,14 +79,6 @@ class StateNode(Node):
         self.pub_roller = self.create_publisher(RollerCmd, "/roller/cmd", qos)
 
         # ---------- Subscribers ----------
-        # UI / logic high-level
-        self.sub_start = self.create_subscription(
-            Bool, "/state/start", self._on_start, 10
-        )
-        self.sub_reset = self.create_subscription(
-            Bool, "/state/reset", self._on_reset, 10
-        )
-
         # Vision
         self.sub_vision_centers = self.create_subscription(
             CupcakeCenters, "/vision/centers", self._on_vision_centers, qos
@@ -95,7 +87,10 @@ class StateNode(Node):
             VisionQuality, "/vision/quality", self._on_vision_quality, qos
         )
 
-        # Pause dari ESP (I2CBridge)
+        # Switch dan pause dari ESP (I2CBridge)
+        self.sub_esp_switch = self.create_subscription(
+            Bool, "/esp_switch_on", self._on_esp_switch, 10
+        )
         self.sub_esp_paused = self.create_subscription(
             Bool, "/esp_paused", self._on_esp_paused, 10
         )
@@ -109,11 +104,11 @@ class StateNode(Node):
         order_param = self.get_parameter("order").get_parameter_value()
         self.order: List[int] = list(order_param.integer_array_value) or [0, 1, 2]
 
-        self._has_started: bool = False
-        self._reset_requested: bool = False
-
         # flag pause dari ESP
         self.esp_paused: bool = False
+
+        # track switch untuk edge detection
+        self.last_switch_on: Optional[bool] = None
 
         # robot joint state (rad)
         q_home_deg = self.get_parameter("q_home_deg").value
@@ -143,44 +138,46 @@ class StateNode(Node):
 
     # ==================== Callbacks ====================
 
-    def _on_start(self, msg: Bool):
-        if not msg.data:
+    def _on_esp_switch(self, msg: Bool):
+        """
+        /esp_switch_on dari I2CBridge:
+        - rising edge False -> True : START sequence dari INIT_POS (kalau lagi IDLE)
+        - falling edge True -> False: RESET ke IDLE
+        """
+        switch_on = msg.data
+
+        if self.last_switch_on is None:
+            # first time, cuma simpan state dan kalau ON langsung start
+            self.last_switch_on = switch_on
+            if switch_on:
+                self.get_logger().info("[STATE] ESP switch ON (initial) -> start sequence.")
+                self._do_start_sequence()
             return
 
-        # Kalau masih jalan (bukan IDLE), jangan restart
-        if self.phase != Phase.IDLE:
-            self.get_logger().warn(
-                f"[STATE] Start received but phase={self.phase.name} (not IDLE). Ignoring."
-            )
-            return
+        # Falling edge: True -> False -> reset
+        if self.last_switch_on and not switch_on:
+            self.get_logger().warn("[STATE] ESP switch OFF -> RESET to IDLE.")
+            self._do_reset_to_idle()
 
-        self.get_logger().info("[STATE] Start sequence requested.")
-        self._has_started = True
-        self._reset_requested = False
-        self.phase = Phase.INIT_POS
-        self.active_index = -1
-        self._plan_home()
-        self._publish_phase()
+        # Rising edge: False -> True -> start jika IDLE
+        if (not self.last_switch_on) and switch_on:
+            if self.phase == Phase.IDLE:
+                self.get_logger().info("[STATE] ESP switch ON -> start sequence from INIT_POS.")
+                self._do_start_sequence()
+            else:
+                self.get_logger().warn(
+                    f"[STATE] ESP switch ON but phase={self.phase.name} (not IDLE). Ignoring start."
+                )
 
-    def _on_reset(self, msg: Bool):
-        if not msg.data:
-            return
+        self.last_switch_on = switch_on
 
-        self.get_logger().warn("[STATE] Reset requested.")
-        self._reset_requested = True
-        self._has_started = False
-        self.phase = Phase.IDLE
-        self.active_index = -1
-
-        # clear traj
-        self.traj = None
-        self.traj_index = 0
-
-        # matikan aktuator
-        self._pump_off()
-        self._roller_off()
-
-        self._publish_phase()
+    def _on_esp_paused(self, msg: Bool):
+        # hardware pause dari ESP
+        self.esp_paused = msg.data
+        if self.esp_paused:
+            self.get_logger().warn("[STATE] ESP paused -> freezing state machine + traj")
+        else:
+            self.get_logger().info("[STATE] ESP resumed -> continuing state machine")
 
     def _on_vision_centers(self, msg: CupcakeCenters):
         self.latest_centers = msg
@@ -190,13 +187,30 @@ class StateNode(Node):
         self.latest_quality = msg
         self.last_vision_stamp = self.get_clock().now()
 
-    def _on_esp_paused(self, msg: Bool):
-        # hardware pause dari ESP
-        self.esp_paused = msg.data
-        if self.esp_paused:
-            self.get_logger().warn("[STATE] ESP paused -> freezing state machine + traj")
-        else:
-            self.get_logger().info("[STATE] ESP resumed -> continuing state machine")
+    # ==================== Start / Reset helpers ====================
+
+    def _do_start_sequence(self):
+        # mulai dari INIT_POS
+        self.phase = Phase.INIT_POS
+        self.active_index = -1
+        self.traj = None
+        self.traj_index = 0
+        self._pump_off()
+        self._roller_off()
+        self._plan_home()
+        self._publish_phase()
+
+    def _do_reset_to_idle(self):
+        # stop dan IDLE, tidak langsung start lagi
+        self.phase = Phase.IDLE
+        self.active_index = -1
+        self.traj = None
+        self.traj_index = 0
+        self._pump_off()
+        self._roller_off()
+        self._settle_until = None
+        self._pump_on_until = None
+        self._publish_phase()
 
     # ==================== Main timer ====================
 
@@ -335,8 +349,7 @@ class StateNode(Node):
 
         # publish JointTargets ke I2C bridge
         msg = JointTargets()
-        # I2CBridge.on_joint mengharapkan 'position' dan opsional 'velocity'
-        msg.position = list(float(v) for v in q)
+        msg.position = [float(v) for v in q]
         msg.velocity = [0.0, 0.0, 0.0, 0.0]
         self.pub_joint_targets.publish(msg)
 
