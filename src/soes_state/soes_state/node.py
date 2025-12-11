@@ -410,8 +410,7 @@ class StateNode(Node):
         elif self.phase == Phase.POST_STEP:
             if self.arm_at and self.arm_at_since is not None:
                 if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
-                    self._enter(Phase.INIT_POS)
-                    self._step_idx == 0
+                    self._enter(Phase.CAMERA)
 
         # CAMERA: tunggu vision_done atau timeout
         elif self.phase == Phase.CAMERA:
