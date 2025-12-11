@@ -211,6 +211,12 @@ class StateNode(Node):
         self.arm_at_since = None
         self.swirl_active = False
 
+        # ---------- NEW: WAIT handling ----------
+        self.q_hold: np.ndarray = self.q_home.copy()
+        self.in_wait: bool = False
+        self.just_left_wait: bool = False
+        # ----------------------------------------
+
         # Timers
         self.timer_state = self.create_timer(0.05, self.tick)          # 20 Hz high-level
         self.timer_arm   = self.create_timer(self.dt, self._arm_tick)  # IK loop
@@ -584,6 +590,20 @@ class StateNode(Node):
         if new_phase == ArmPhase.HOME:
             self._home_done_logged = False
 
+        # ---------- NEW: WAIT state bookkeeping ----------
+        if new_phase == ArmPhase.WAIT:
+            # baru masuk WAIT
+            self.in_wait = True
+            self.just_left_wait = False
+            self.q_hold = self.q.copy()
+        elif old_phase == ArmPhase.WAIT and new_phase != ArmPhase.WAIT:
+            # baru keluar WAIT
+            self.in_wait = False
+            self.just_left_wait = True
+            # pastikan internal state mulai dari pose hold
+            self.q = self.q_hold.copy()
+        # -------------------------------------------------
+
         if new_phase != old_phase:
             if self.des_xyz is not None:
                 self.get_logger().info(
@@ -712,6 +732,19 @@ class StateNode(Node):
         if self.phase == Phase.TEST_MOTOR:
             return
 
+        # ---------- NEW: frame aman segera setelah keluar WAIT ----------
+        if self.just_left_wait:
+            # tahan di q_hold dengan vel = 0
+            qdot_zero = np.zeros(4, dtype=float)
+            self._publish_targets(self.q_hold, qdot_zero, use_velocity=True)
+            self._set_arm_at(False)
+            self._set_swirl_active(False)
+            # sinkronkan state internal
+            self.q = self.q_hold.copy()
+            self.just_left_wait = False
+            return
+        # ----------------------------------------------------------------
+
         # HOME
         if self.arm_phase == ArmPhase.HOME:
             speed_scale = self._s_curve_speed(self.home_T)
@@ -721,8 +754,11 @@ class StateNode(Node):
 
         # WAIT
         if self.arm_phase == ArmPhase.WAIT:
+            # NEW: hold posisi dengan velocity mode 0
             self._set_arm_at(False)
             self._set_swirl_active(False)
+            qdot_zero = np.zeros(4, dtype=float)
+            self._publish_targets(self.q_hold, qdot_zero, use_velocity=True)
             return
 
         # MOVE
