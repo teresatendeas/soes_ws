@@ -1,37 +1,30 @@
 soes_state:
   ros__parameters:
 
-    # ========================
-    # --- TIMING PARAMETERS ---
-    # ========================
-    settle_before_pump_s: 2.0
+    # ===== Sequence timing =====
+    settle_before_pump_s: 0.6
     pump_on_s: 2.0
     swirl_time_s: 1.0
+
+    # Urutan cup (index sesuai CupcakeCenters)
     order: [0, 1, 2]
 
-    # ========================
-    # --- ROLLER PARAMETERS ---
-    # ========================
-    roller_distance_mm: 70.0
-    roller_speed_mm_s: 17.5
+    # ===== Robot kinematics (sesuaikan dengan robotmu) =====
+    link_l1_m: 0.17
+    link_l2_m: 0.12
+    link_l3_m: 0.04
+    tool_offset_m: 0.03
 
-    # ==========================
-    # --- VISION PARAMETERS ----
-    # ==========================
-    camera_timeout_s: 50.0
+    # HOME joint angle (deg)
+    q_home_deg: [0.0, 90.0, -90.0, 0.0]
 
-    # ==========================
-    # --- TESTING PARAMETERS ----
-    # ==========================
-    test_period_s: 3.0
-    test_amp_rad: [3.14, 3.14, 3.14]
-    test_servo_deg: [30.0, 150.0]
+    # Max joint speed (deg/s)
+    max_joint_speed_deg_s: [45.0, 45.0, 45.0, 45.0]
 
-    
-    # ==========================
-    # --- OPTIONAL (for future) -
-    # ==========================
-    # pump_duty: 1.0      # If you later expose duty cycle control
-    # at_target_topic: "/arm/at_target"   # If you add arm feedback
+    # Trajectory
+    traj_dt_s: 0.02
+    s_curve_ratio: 0.3
 
-
+    # Vision
+    use_vision: true
+    vision_timeout_s: 3.0
