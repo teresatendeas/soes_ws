@@ -1,495 +1,776 @@
 #!/usr/bin/env python3
-import enum
-import math
-from typing import Optional, List
+import enum, math
+from typing import Optional, List, Tuple
 
 import numpy as np
 import rclpy
-from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.duration import Duration
 
 from std_msgs.msg import Bool, Int32
-from soes_msgs.msg import (
-    PumpCmd,
-    VisionQuality,
-    JointTargets,
-    RollerCmd,
-    CupcakeCenters,
-)
+from soes_msgs.msg import PumpCmd, VisionQuality, JointTargets, RollerCmd, CupcakeCenters
+
+from .utils import PumpController
 
 
-# ---------------- High-level phases ----------------
+# ---------------- High-level phases (sequence) ----------------
 class Phase(enum.Enum):
-    INIT_POS   = 0
-    STEP0      = 1
-    STEP1      = 2
-    STEP2      = 3
-    CAMERA     = 4
-    ROLL_TRAY  = 5
-    IDLE       = 6
-    TEST_MOTOR = 7
+    INIT_POS    = 0
+    STEP0       = 1
+    STEP1       = 2
+    STEP2       = 3
+    CAMERA      = 4
+    ROLL_TRAY   = 5
+    IDLE        = 6
+    TEST_MOTOR  = 7
+    POST_STEP   = 8
+
+
+# ---------------- Arm phases (internal IK) ----------------
+class ArmPhase(enum.Enum):
+    HOME  = 0    # joint-space home (index = -1)
+    WAIT  = 1    # idle until active_index changes
+    MOVE  = 2    # go to center i (Cartesian target)
+    SWIRL = 3    # generate spiral about center i
 
 
 class StateNode(Node):
     def __init__(self):
-        super().__init__("soes_state")
+        super().__init__('soes_state')
 
-        # ---------- Parameters ----------
-        # Timing cupcake process
-        self.declare_parameter("settle_before_pump_s", 0.6)
-        self.declare_parameter("pump_on_s", 2.0)
-        self.declare_parameter("swirl_time_s", 1.0)
-        self.declare_parameter("order", [0, 1, 2])  # urutan cup
+        # =====================================================
+        # ==========  HIGH-LEVEL STATE PARAMETERS  ============
+        # =====================================================
+        self.declare_parameter('settle_before_pump_s', 2.0)
+        self.declare_parameter('pump_on_s', 2.0)
+        self.declare_parameter('swirl_time_s', 1.0)
+        self.declare_parameter('order', [0, 1, 2])
 
-        # Robot kinematics
-        self.declare_parameter("link_l1_m", 0.090)
-        self.declare_parameter("link_l2_m", 0.110)
-        self.declare_parameter("link_l3_m", 0.080)
-        self.declare_parameter("tool_offset_m", 0.030)
+        self.declare_parameter('roller_distance_mm', 70.0)
+        self.declare_parameter('roller_speed_mm_s', 17.5)
 
-        # joint limits dan kecepatan default
-        self.declare_parameter("q_home_deg", [0.0, -40.0, 80.0, 90.0])
-        self.declare_parameter("max_joint_speed_deg_s", [40.0, 40.0, 40.0, 90.0])
+        # camera timeout
+        self.declare_parameter('camera_timeout_s', 50.0)
 
-        # Trajectory
-        self.declare_parameter("traj_dt_s", 0.02)
-        self.declare_parameter("s_curve_ratio", 0.3)
+        self.t_settle   = float(self.get_parameter('settle_before_pump_s').value)
+        self.t_pump     = float(self.get_parameter('pump_on_s').value)
+        self.t_swirl    = float(self.get_parameter('swirl_time_s').value)
+        self.order      = list(self.get_parameter('order').value)
+        self.roll_dist  = float(self.get_parameter('roller_distance_mm').value)
+        self.roll_speed = float(self.get_parameter('roller_speed_mm_s').value)
+        self.cam_to     = float(self.get_parameter('camera_timeout_s').value)
 
-        # YOLO / vision
-        self.declare_parameter("use_vision", True)
-        self.declare_parameter("vision_timeout_s", 3.0)
+        # TEST_MOTOR params
+        self.declare_parameter('test_period_s', 3.0)
+        self.declare_parameter('test_amp_rad', [3.14, 3.14, 3.14])
+        self.declare_parameter('test_servo_deg', [30.0, 150.0])
+        self.test_period_s  = float(self.get_parameter('test_period_s').value)
+        self.test_amp_rad   = list(self.get_parameter('test_amp_rad').value)
+        self.test_servo_deg = list(self.get_parameter('test_servo_deg').value)
 
-        # Publikasi
+        # =====================================================
+        # ==========   ARM / IK CONTROL PARAMETERS   ==========
+        # =====================================================
+        self.declare_parameter('rate_hz', 20.0)
+        self.declare_parameter('pos_tol_m', 0.01)
+        self.declare_parameter('settle_s', 0.5)
+
+        self.declare_parameter('link_lengths_m', [0.00, 0.17, 0.14, 0.04])
+
+        self.declare_parameter('kp_cart', 1.0)
+        self.declare_parameter('damping_lambda', 0.1)
+        self.declare_parameter('qdot_limit_rad_s', [3.0, 3.0, 3.0, 3.0])
+
+        self.declare_parameter('q_min_rad', [-314.16, -157.08, -157.08, -1.5708])
+        self.declare_parameter('q_max_rad', [ 314.16,  157.08,  157.08,  1.5708])
+
+        self.declare_parameter('q_home_rad', [0.0, 1.5708, -1.5708, 0.0])
+        self.declare_parameter('kp_joint', 3.0)
+        self.declare_parameter('home_tol_rad', 0.314)
+
+        # Spiral parameters
+        self.declare_parameter('R0', 0.025)
+        self.declare_parameter('turns', 3)
+        self.declare_parameter('alpha', -0.03)
+        self.declare_parameter('height', 0.04)
+        self.declare_parameter('omega', 2.0)
+
+        # S-curve profile times
+        self.declare_parameter('move_profile_time_s', 1.0)
+        self.declare_parameter('home_profile_time_s', 1.0)
+
+        # ----- Load arm params -----
+        self.rate_hz  = float(self.get_parameter('rate_hz').value)
+        self.dt       = 1.0 / self.rate_hz
+        self.pos_tol  = float(self.get_parameter('pos_tol_m').value)
+        self.settle_s = float(self.get_parameter('settle_s').value)
+
+        self.links    = np.array(self.get_parameter('link_lengths_m').value, dtype=float)
+        self.L1, self.L2, self.L3, self.L4 = map(float, self.links)
+
+        self.kp       = float(self.get_parameter('kp_cart').value)
+        self.lmbda    = float(self.get_parameter('damping_lambda').value)
+        self.qdot_lim = np.array(self.get_parameter('qdot_limit_rad_s').value, dtype=float)
+        self.q_min    = np.array(self.get_parameter('q_min_rad').value, dtype=float)
+        self.q_max    = np.array(self.get_parameter('q_max_rad').value, dtype=float)
+
+        self.q_home   = np.array(self.get_parameter('q_home_rad').value, dtype=float)
+        self.kp_joint = float(self.get_parameter('kp_joint').value)
+        self.home_tol = float(self.get_parameter('home_tol_rad').value)
+
+        self.R0       = float(self.get_parameter('R0').value)
+        self.turns    = int(self.get_parameter('turns').value)
+        self.alpha    = float(self.get_parameter('alpha').value)
+        self.height   = float(self.get_parameter('height').value)
+        self.omega    = float(self.get_parameter('omega').value)
+
+        self.theta_max = 2.0 * math.pi * self.turns
+        self.s         = (self.height / self.theta_max) if self.theta_max != 0.0 else 0.0
+
+        self.move_T = float(self.get_parameter('move_profile_time_s').value)
+        self.home_T = float(self.get_parameter('home_profile_time_s').value)
+
+        # =====================================================
+        # ==================   ROS I/O   ======================
+        # =====================================================
         qos = QoSProfile(
+            depth=10,
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
-            depth=10,
         )
 
-        # ---------- Publishers ----------
-        self.pub_phase = self.create_publisher(Int32, "/state/phase", 10)
-        self.pub_active_index = self.create_publisher(Int32, "/state/active_index", 10)
+        # State / roller / pump / vision quality
+        self.index_pub   = self.create_publisher(Int32, '/state/active_index', 1)
+        self.pump_pub    = self.create_publisher(PumpCmd, '/pump/cmd', 1)
+        self.roller_pub  = self.create_publisher(RollerCmd, '/roller/cmd', 1)
+        self.qual_sub    = self.create_subscription(
+            VisionQuality, '/vision/quality', self.on_quality, qos
+        )
 
-        # ke I2C bridge (harus cocok dengan I2CBridge.on_joint)
-        self.pub_joint_targets = self.create_publisher(JointTargets, "/arm/joint_targets", qos)
+        # Arm command and feedback topics
+        self.arm_pub     = self.create_publisher(JointTargets, '/arm/joint_targets', 10)
+        self.arm_at_pub  = self.create_publisher(Bool, '/arm/at_target', 1)
+        self.swirl_pub   = self.create_publisher(Bool, '/arm/swirl_active', 1)
 
-        # ke I2C bridge (harus cocok dengan I2CBridge.on_pump / on_roller)
-        self.pub_pump = self.create_publisher(PumpCmd, "/pump/cmd", qos)
-        self.pub_roller = self.create_publisher(RollerCmd, "/roller/cmd", qos)
+        # publish state phase
+        self.phase_pub = self.create_publisher(Int32, '/state/phase', 1)
 
-        # ---------- Subscribers ----------
+        # switch / pause
+        self.switch_on = True   # HIGH at startup
+        self.create_subscription(Bool, '/esp_switch_on', self._on_switch, 10)
+
+        self.paused = False
+        self.pause_start = None
+        self.create_subscription(Bool, '/esp_paused', self._on_paused, 10)
+
         # Vision
-        self.sub_vision_centers = self.create_subscription(
-            CupcakeCenters, "/vision/centers", self._on_vision_centers, qos
-        )
-        self.sub_vision_quality = self.create_subscription(
-            VisionQuality, "/vision/quality", self._on_vision_quality, qos
-        )
-
-        # Switch dan pause dari ESP (I2CBridge)
-        self.sub_esp_switch = self.create_subscription(
-            Bool, "/esp_switch_on", self._on_esp_switch, 10
-        )
-        self.sub_esp_paused = self.create_subscription(
-            Bool, "/esp_paused", self._on_esp_paused, 10
+        self.vision_request_pub = self.create_publisher(Bool, '/vision/request', 1)
+        self.vision_done: Optional[bool] = None
+        self.create_subscription(Bool, '/vision/soes_done', self._on_vision_done, 10)
+        self.center_sub = self.create_subscription(
+            CupcakeCenters, '/vision/centers', self._on_centers, qos
         )
 
-        # ---------- Internal state ----------
-        self.phase: Phase = Phase.IDLE
-        self.last_phase: Phase = Phase.IDLE
+        # Pump helper
+        self.pump = PumpController(self._pump_on, self._pump_off)
 
-        self.active_index: int = -1      # cup index; -1 = HOME
-        order_param = self.get_parameter("order").get_parameter_value()
-        self.order: List[int] = list(order_param.integer_array_value) or [0, 1, 2]
+        # =====================================================
+        # ===================   RUNTIME   =====================
+        # =====================================================
+        # High-level state
+        self.phase = Phase.IDLE
+        self.phase_t0 = self.get_clock().now()
+        self.quality_flag = False
+        self._step_idx = 0
+        self._did_start_pump = False
 
-        # flag pause dari ESP
-        self.esp_paused: bool = False
+        # Roller state
+        self._roller_active = False
+        self._roller_duration_s = 0.0
 
-        # track switch untuk edge detection
-        self.last_switch_on: Optional[bool] = None
+        # Arm / IK runtime
+        self.q: np.ndarray = np.zeros(4, dtype=float)
+        self.active_index: int = -1
+        self.centers: Optional[List[Tuple[float, float, float]]] = None
 
-        # robot joint state (rad)
-        q_home_deg = self.get_parameter("q_home_deg").value
-        self.q_home = np.radians(np.array(q_home_deg, dtype=float))
-        self.q_current = self.q_home.copy()
+        self.arm_phase = ArmPhase.HOME
+        self.arm_phase_t0 = self.get_clock().now()
+        self.last_within_tol = None
+        self.des_xyz: Optional[np.ndarray] = None
 
-        # Trajectory buffer (joint-space)
-        self.traj: Optional[np.ndarray] = None
-        self.traj_index: int = 0
+        # Spiral bookkeeping
+        self.spiral_theta = 0.0
+        self.spiral_center: Optional[np.ndarray] = None
 
-        # Vision buffer
-        self.latest_centers: Optional[CupcakeCenters] = None
-        self.latest_quality: Optional[VisionQuality] = None
-        self.last_vision_stamp = self.get_clock().now()
+        # Arrival logging
+        self._home_done_logged = False
+
+        # Arm at-target + swirl flags (now internal)
+        self.arm_at = False
+        self.arm_at_since = None
+        self.swirl_active = False
 
         # Timers
-        self.dt = float(self.get_parameter("traj_dt_s").value)
-        self.timer_main = self.create_timer(self.dt, self._on_timer)
+        self.timer_state = self.create_timer(0.05, self.tick)          # 20 Hz high-level
+        self.timer_arm   = self.create_timer(self.dt, self._arm_tick)  # IK loop
 
-        # Pump timing
-        self._pump_on_until: Optional[rclpy.time.Time] = None
-        self._settle_until: Optional[rclpy.time.Time] = None
-
-        # Log awal
-        self.get_logger().info("[STATE] Node soes_state (merged) started.")
+        self.get_logger().info('soes_state: ready (IDLE, waiting RESET LOW).')
         self._publish_phase()
 
-    # ==================== Callbacks ====================
+    # =====================================================
+    # ==================  VISION CALLBACKS  ===============
+    # =====================================================
+    def _on_vision_done(self, msg: Bool):
+        self.vision_done = bool(msg.data)
+        self.get_logger().info(f'Received soes_done = {self.vision_done}')
 
-    def _on_esp_switch(self, msg: Bool):
-        """
-        /esp_switch_on dari I2CBridge:
-        - rising edge False -> True : START sequence dari INIT_POS (kalau lagi IDLE)
-        - falling edge True -> False: RESET ke IDLE
-        """
-        switch_on = msg.data
+    def _on_centers(self, msg: CupcakeCenters):
+        self.centers = [(p.x, p.y, p.z) for p in msg.centers]
 
-        if self.last_switch_on is None:
-            self.last_switch_on = switch_on
-            if switch_on:
-                self.get_logger().info("[STATE] ESP switch ON (initial) -> start sequence.")
-                self._do_start_sequence()
+        if len(self.centers) < 3:
+            self.get_logger().warn("centers < 3; waiting for all three targets")
             return
 
-        # Falling edge: True -> False -> reset
-        if self.last_switch_on and not switch_on:
-            self.get_logger().warn("[STATE] ESP switch OFF -> RESET to IDLE.")
-            self._do_reset_to_idle()
-
-        # Rising edge: False -> True -> start jika IDLE
-        if (not self.last_switch_on) and switch_on:
-            if self.phase == Phase.IDLE:
-                self.get_logger().info("[STATE] ESP switch ON -> start sequence from INIT_POS.")
-                self._do_start_sequence()
-            else:
-                self.get_logger().warn(
-                    f"[STATE] ESP switch ON but phase={self.phase.name} (not IDLE). Ignoring start."
-                )
-
-        self.last_switch_on = switch_on
-
-    def _on_esp_paused(self, msg: Bool):
-        self.esp_paused = msg.data
-        if self.esp_paused:
-            self.get_logger().warn("[STATE] ESP paused -> freezing state machine + traj")
-        else:
-            self.get_logger().info("[STATE] ESP resumed -> continuing state machine")
-
-    def _on_vision_centers(self, msg: CupcakeCenters):
-        self.latest_centers = msg
-        self.last_vision_stamp = self.get_clock().now()
-
-    def _on_vision_quality(self, msg: VisionQuality):
-        self.latest_quality = msg
-        self.last_vision_stamp = self.get_clock().now()
-
-    # ==================== Start / Reset helpers ====================
-
-    def _do_start_sequence(self):
-        self.phase = Phase.INIT_POS
-        self.active_index = -1
-        self.traj = None
-        self.traj_index = 0
-        self._pump_off()
-        self._roller_off()
-        self._plan_home()
-        self._publish_phase()
-
-    def _do_reset_to_idle(self):
-        self.phase = Phase.IDLE
-        self.active_index = -1
-        self.traj = None
-        self.traj_index = 0
-        self._pump_off()
-        self._roller_off()
-        self._settle_until = None
-        self._pump_on_until = None
-
-        # supaya klik ON berikutnya selalu dianggap start baru
-        self.last_switch_on = False
-
-        self._publish_phase()
-
-    # ==================== Main timer ====================
-
-    def _on_timer(self):
-        if self.esp_paused:
-            return
-
-        self._step_trajectory()
-
-        if self.phase == Phase.IDLE:
-            self.get_logger().info("[STATE] PHASE IDLE.")
-            self._step_idle()
-        elif self.phase == Phase.INIT_POS:
-            self.get_logger().info("[STATE] PHASE INIT_POS.")
-            self._step_init_pos()
-        elif self.phase == Phase.STEP0:
-            self.get_logger().info("[STATE] PHASE STEP0.")
-            self._step_step_phase(0, Phase.STEP1)
-        elif self.phase == Phase.STEP1:
-            self.get_logger().info("[STATE] PHASE STEP1.")
-            self._step_step_phase(1, Phase.STEP2)
-        elif self.phase == Phase.STEP2:
-            self.get_logger().info("[STATE] PHASE STEP2.")
-            self._step_step_phase(2, Phase.CAMERA)
-        elif self.phase == Phase.CAMERA:
-            self.get_logger().info("[STATE] PHASE CAMERA.")
-            self._step_camera()
-        elif self.phase == Phase.ROLL_TRAY:
-            self.get_logger().info("[STATE] PHASE ROLL_TRAY.")
-            self._step_roll_tray()
-        elif self.phase == Phase.TEST_MOTOR:
-            self.get_logger().info("[STATE] PHASE TEST_MOTOR.")
-            self._step_test_motor()
-
-    # ==================== Phase helpers ====================
-
-    def _step_idle(self):
-        pass
-
-    def _step_init_pos(self):
-        if not self._trajectory_active():
-            self.get_logger().info("[STATE] Reached HOME. Go to STEP0.")
-            self.phase = Phase.STEP0
-            self._publish_phase()
-            self.active_index = self.order[0]
-            self._plan_move_to_cup(self.active_index)
-
-    def _step_step_phase(self, order_idx: int, next_phase: Phase):
-        if self._trajectory_active():
-            return
-
-        now = self.get_clock().now()
-
-        if self._settle_until is None:
-            settle_s = float(self.get_parameter("settle_before_pump_s").value)
-            self._settle_until = now + Duration(seconds=settle_s)
-            self.get_logger().info(f"[STATE] STEP{order_idx}: settling for pump.")
-            return
-
-        if now < self._settle_until:
-            return
-
-        if self._pump_on_until is None:
-            pump_s = float(self.get_parameter("pump_on_s").value)
-            self._pump_on(now, pump_s)
-            self._plan_swirl_about_current_cup()
-            self.get_logger().info(f"[STATE] STEP{order_idx}: pump ON + swirl.")
-            return
-
-        if now < self._pump_on_until:
-            return
-
-        self._pump_off()
-        self._settle_until = None
-        self._pump_on_until = None
-
-        if order_idx + 1 < len(self.order):
-            self.phase = Phase(Phase.STEP0.value + order_idx + 1)
-            self.active_index = self.order[order_idx + 1]
+        if self.active_index in (0, 1, 2) and self.arm_phase in (ArmPhase.HOME, ArmPhase.WAIT):
             self.get_logger().info(
-                f"[STATE] STEP{order_idx}: done, go to STEP{order_idx+1} (cup idx={self.active_index})."
+                f"[ROBOHAND] Centers ready with active_index={self.active_index}, realigning phase."
             )
-            self._publish_phase()
-            self._plan_move_to_cup(self.active_index)
-        else:
-            self.get_logger().info("[STATE] All steps done. Go to CAMERA.")
-            self.phase = next_phase
-            self._publish_phase()
-            self.active_index = -1
-            self._plan_home()
+            self._align_arm_phase_with_index()
 
-    def _step_camera(self):
-        use_vision = bool(self.get_parameter("use_vision").value)
-        if not use_vision:
-            self.get_logger().info("[STATE] CAMERA: vision disabled, go to ROLL_TRAY.")
-            self.phase = Phase.ROLL_TRAY
-            self._publish_phase()
-            return
+    # =====================================================
+    # ==================  GENERIC HELPERS  ================
+    # =====================================================
+    def _enter(self, new_phase: Phase):
+        old_phase = self.phase
+        self.phase = new_phase
+        self.phase_t0 = self.get_clock().now()
+        self._did_start_pump = False
 
-        if self.latest_quality is None:
-            return
+        # reset roller state jika bukan ROLL_TRAY
+        if new_phase != Phase.ROLL_TRAY:
+            self._roller_active = False
+            self._roller_duration_s = 0.0
 
-        # VisionQuality dari vision node: needs_human == True kalau jelek
-        if not self.latest_quality.needs_human:
-            self.get_logger().info("[STATE] CAMERA: quality OK (needs_human=False), go to ROLL_TRAY.")
-            self.phase = Phase.ROLL_TRAY
-            self._publish_phase()
+        # Vision request jika CAMERA
+        if new_phase == Phase.CAMERA:
+            self.vision_done = None
+            req = Bool()
+            req.data = True
+            self.vision_request_pub.publish(req)
+            self.get_logger().info('CAMERA: sent /vision/request = True, waiting /vision/soes_done')
 
-    def _step_roll_tray(self):
-        cmd = RollerCmd()
-        cmd.on = True
-        self.pub_roller.publish(cmd)
-
-        self.get_logger().info("[STATE] ROLL_TRAY: send roller ON, then IDLE.")
-        self.phase = Phase.IDLE
+        # Log overall
+        self.get_logger().warn(f'[OVERALL] {old_phase.name} → {new_phase.name}')
+        self.get_logger().info(f'[STATE] -> {self.phase.name}')
         self._publish_phase()
 
-    def _step_test_motor(self):
-        pass
+    def _elapsed(self) -> float:
+        return (self.get_clock().now() - self.phase_t0).nanoseconds * 1e-9
 
-    # ==================== Trajectory + joint targets ====================
-
-    def _trajectory_active(self) -> bool:
-        return self.traj is not None and self.traj_index < len(self.traj)
-
-    def _step_trajectory(self):
-        if not self._trajectory_active():
-            return
-
-        q = self.traj[self.traj_index]
-        self.q_current = q.copy()
-        self.traj_index += 1
-
-        msg = JointTargets()
-        msg.position = [float(v) for v in q]
-        msg.velocity = [0.0, 0.0, 0.0, 0.0]
-        self.pub_joint_targets.publish(msg)
-
-    def _plan_home(self):
-        self._plan_joint_traj(self.q_current, self.q_home)
-
-    def _plan_move_to_cup(self, idx: int):
-        x, y, z = self._get_center_xyz(idx)
-        q_target = self._ik_cartesian_target(x, y, z)
-        if q_target is None:
-            self.get_logger().error(f"[STATE] IK failed for cup {idx}.")
-            return
-
-        self._plan_joint_traj(self.q_current, q_target)
-
-    def _plan_swirl_about_current_cup(self):
-        swirl_time = float(self.get_parameter("swirl_time_s").value)
-        steps = max(1, int(swirl_time / self.dt))
-
-        q_start = self.q_current.copy()
-        q = np.zeros((steps, 4))
-        for i in range(steps):
-            t = i / max(steps - 1, 1)
-            q[i, :] = q_start
-            q[i, 3] = q_start[3] + math.radians(180.0) * math.sin(math.pi * t)
-
-        self.traj = q
-        self.traj_index = 0
-
-    def _plan_joint_traj(self, q_start: np.ndarray, q_goal: np.ndarray):
-        max_speed_deg = np.array(self.get_parameter("max_joint_speed_deg_s").value)
-        max_speed = np.radians(max_speed_deg)
-
-        dq = np.abs(q_goal - q_start)
-        t_needed = np.max(dq / np.maximum(max_speed, 1e-3))
-        t_needed = max(t_needed, self.dt)
-        steps = max(2, int(t_needed / self.dt))
-
-        q = np.zeros((steps, 4))
-        for i in range(steps):
-            s = i / (steps - 1)
-            s_smooth = s * s * (3.0 - 2.0 * s)
-            q[i, :] = q_start + s_smooth * (q_goal - q_start)
-
-        self.traj = q
-        self.traj_index = 0
-
-    # ==================== IK ====================
-
-    def _ik_cartesian_target(self, x: float, y: float, z: float) -> Optional[np.ndarray]:
-        l1 = float(self.get_parameter("link_l1_m").value)
-        l2 = float(self.get_parameter("link_l2_m").value)
-        l3 = float(self.get_parameter("link_l3_m").value)
-        tool_offset = float(self.get_parameter("tool_offset_m").value)
-
-        q0 = math.atan2(y, x)
-
-        r = math.sqrt(x * x + y * y)
-        z_eff = z + tool_offset
-
-        L = l2 + l3
-
-        D = (r * r + z_eff * z_eff - l1 * l1 - L * L) / (2.0 * l1 * L)
-        if D < -1.0 or D > 1.0:
-            self.get_logger().error(f"[IK] Unreachable: D={D:.3f}")
-            return None
-
-        q2 = math.acos(D)
-        alpha = math.atan2(z_eff, r)
-        beta = math.atan2(L * math.sin(q2), l1 + L * math.cos(q2))
-        q1 = alpha - beta
-
-        q3_center_deg = 90.0
-        q3 = math.radians(q3_center_deg)
-
-        q = np.array([q0, q1, q2, q3], dtype=float)
-        return q
-
-    # ==================== Center helper (sesuai VisionNode) ====================
-
-    def _get_center_xyz(self, idx: int):
-        """
-        Ambil (x,y,z) dari CupcakeCenters.centers[idx] (VisionNode).
-        Kalau belum ada data atau index kurang, pakai dummy.
-        """
-        default_xyz = (0.18, 0.0, -0.13)
-
-        if self.latest_centers is None:
-            self.get_logger().warn("[STATE] No centers from vision, using dummy center.")
-            return default_xyz
-
-        centers = list(self.latest_centers.centers)
-        if idx < 0 or idx >= len(centers):
-            self.get_logger().warn(
-                f"[STATE] Cup index {idx} out of range (len={len(centers)}). Using dummy center."
-            )
-            return default_xyz
-
-        p = centers[idx]
-        return (float(p.x), float(p.y), float(p.z))
-
-    # ==================== Pump & roller ====================
-
-    def _pump_on(self, now: rclpy.time.Time, duration_s: float):
-        cmd = PumpCmd()
-        cmd.on = True
-        self.pub_pump.publish(cmd)
-        self._pump_on_until = now + Duration(seconds=duration_s)
-
-    def _pump_off(self):
-        cmd = PumpCmd()
-        cmd.on = False
-        self.pub_pump.publish(cmd)
-        self._pump_on_until = None
-
-    def _roller_off(self):
-        cmd = RollerCmd()
-        cmd.on = False
-        self.pub_roller.publish(cmd)
-
-    # ==================== Utils ====================
+    def _publish_index(self, idx: int):
+        self.active_index = int(idx)
+        msg = Int32()
+        msg.data = self.active_index
+        self.index_pub.publish(msg)
+        self.get_logger().info(f'active_index = {self.active_index}')
+        self._align_arm_phase_with_index()
 
     def _publish_phase(self):
-        if self.phase != self.last_phase:
-            self.get_logger().info(f"[STATE] Phase -> {self.phase.name}")
-            self.last_phase = self.phase
-
         msg = Int32()
         msg.data = int(self.phase.value)
-        self.pub_phase.publish(msg)
+        self.phase_pub.publish(msg)
 
-        idx_msg = Int32()
-        idx_msg.data = int(self.active_index)
-        self.pub_active_index.publish(idx_msg)
+    def _pump_on(self, duty: float, duration_s: float):
+        msg = PumpCmd()
+        msg.on = True
+        msg.duty = float(duty)
+        msg.duration_s = float(duration_s)
+        self.pump_pub.publish(msg)
+
+    def _pump_off(self):
+        msg = PumpCmd()
+        msg.on = False
+        msg.duty = 0.0
+        msg.duration_s = 0.0
+        self.pump_pub.publish(msg)
+
+    def _roller_cmd(self, on: bool):
+        msg = RollerCmd()
+        msg.on = bool(on)
+        self.roller_pub.publish(msg)
+
+    # =====================================================
+    # ==================  SWITCH / PAUSE  =================
+    # =====================================================
+    def _on_switch(self, msg: Bool):
+        """
+        /esp_switch_on:
+        - True  = HIGH (tombol tidak ditekan)
+        - False = LOW  (tombol ditekan)
+
+        LOW (tekan)  -> mulai dari INIT_POS
+        HIGH awal    -> tetap IDLE
+        """
+        prev = self.switch_on
+        self.switch_on = bool(msg.data)
+
+        # HIGH -> LOW : tombol ditekan -> RESET & mulai sequence
+        if prev and not self.switch_on:
+            self.get_logger().warn('RESET pressed (HIGH -> LOW) -> INIT_POS.')
+            self.pump.stop()
+            self._roller_cmd(False)
+            self.swirl_active = False
+            self._set_arm_at(False)
+            self._step_idx = 0
+
+            # HOME
+            self._publish_index(-1)
+            self._enter(Phase.INIT_POS)
+
+        # LOW -> HIGH : tombol dilepas -> kembali ke IDLE
+        elif (not prev) and self.switch_on:
+            self.get_logger().warn('RESET released (LOW -> HIGH) -> IDLE.')
+            self.pump.stop()
+            self._roller_cmd(False)
+            self._publish_index(-1)
+            self._enter(Phase.IDLE)
+
+    def _on_paused(self, msg: Bool):
+        new_state = bool(msg.data)
+
+        if new_state and not self.paused:
+            self.pause_start = self.get_clock().now()
+
+        elif not new_state and self.paused:
+            if self.pause_start is not None:
+                dt = self.get_clock().now() - self.pause_start
+                # shift both high-level and arm timers
+                self.phase_t0 = self.phase_t0 + dt
+                self.arm_phase_t0 = self.arm_phase_t0 + dt
+                self.pause_start = None
+
+        self.paused = new_state
+
+    def on_quality(self, msg: VisionQuality):
+        self.quality_flag = bool(msg.needs_human)
+
+    # =====================================================
+    # ==================  MAIN TICK (STATE) ===============
+    # =====================================================
+    def tick(self):
+        if self.paused:
+            return
+
+        if self.phase == Phase.TEST_MOTOR:
+            self._test_motor_tick()
+            return
+
+        # INIT_POS: tunggu sampai arm HOME + settle
+        if self.phase == Phase.INIT_POS:
+            if self.arm_at and self.arm_at_since is not None:
+                if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
+
+                    if self._step_idx == 0:
+                        self._start_step(0)
+
+                    elif self._step_idx == 1:
+                        self._start_step(1)
+
+                    elif self._step_idx == 2:
+                        self.get_logger().info("All steps done -> POST_STEP")
+                        self._step_idx = -1
+                        self._publish_index(-1)
+                        self._enter(Phase.POST_STEP)
+
+        elif self.phase == Phase.STEP0:
+            if self._run_step():
+                self.get_logger().info("STEP0 → STEP1")
+                self._step_idx = 1
+                self._publish_index(-1)
+                self._enter(Phase.INIT_POS)
+
+        elif self.phase == Phase.STEP1:
+            if self._run_step():
+                self.get_logger().info("STEP1 → STEP2")
+                self._step_idx = 2
+                self._publish_index(-1)
+                self._enter(Phase.INIT_POS)
+
+        elif self.phase == Phase.STEP2:
+            # sekarang STEP2 selesai -> sudah ditangani di INIT_POS / POST_STEP jalur di atas
+            pass
+
+        # POST_STEP: cukup tunggu HOME settle lalu masuk CAMERA
+        elif self.phase == Phase.POST_STEP:
+            if self.arm_at and self.arm_at_since is not None:
+                if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
+                    self._enter(Phase.CAMERA)
+
+        # CAMERA: tunggu vision_done atau timeout
+        elif self.phase == Phase.CAMERA:
+
+            # 1. Ada hasil
+            if self.vision_done is not None:
+                self.get_logger().info("Vision is done")
+                if self.vision_done:
+                    self.get_logger().info("Vision OK → ROLL_TRAY")
+                else:
+                    self.get_logger().warn("Vision BAD → ROLL_TRAY (tetap jalan tray)")
+                self._enter(Phase.ROLL_TRAY)
+                return
+
+            # 2. Timeout
+            if self._elapsed() >= self.cam_to:
+                self.get_logger().warn("Camera timeout → ROLL_TRAY")
+                self._enter(Phase.ROLL_TRAY)
+                return
+
+        # ROLL_TRAY
+        elif self.phase == Phase.ROLL_TRAY:
+            roll_time = self.roll_dist / max(self.roll_speed, 1e-3)
+            t = self._elapsed()
+
+            if not self._roller_active:
+                self._roller_active = True
+                self._roller_duration_s = roll_time
+                self._roller_cmd(True)
+                self.get_logger().info(f'ROLLER ON for {roll_time:.2f} s')
+                return
+
+            if t >= self._roller_duration_s:
+                self._roller_cmd(False)
+                self._roller_active = False
+                self.get_logger().info('ROLLER OFF, restart.')
+
+                self._publish_index(-1)
+                self._step_idx = 0
+                self._enter(Phase.INIT_POS)
+
+        elif self.phase == Phase.IDLE:
+            return
+
+    # =====================================================
+    # ==================  STEP LOGIC  =====================
+    # =====================================================
+    def _start_step(self, step_idx: int):
+        idx = self.order[step_idx]
+        self._publish_index(idx)
+        self._enter(
+            Phase.STEP0 if step_idx == 0
+            else Phase.STEP1 if step_idx == 1
+            else Phase.STEP2
+        )
+
+    def _run_step(self) -> bool:
+        """
+        True  -> step selesai (swirl berhenti, pump dimatikan)
+        False -> masih swirl / masih jalan
+        """
+        if self.swirl_active:
+            if not self._did_start_pump:
+                self.pump.start(duty=1.0, duration_s=0.0)
+                self._did_start_pump = True
+                self.get_logger().info('Pump ON (SWIRL)')
+            return False
+        else:
+            if self._did_start_pump:
+                self.pump.stop()
+                self._did_start_pump = False
+                self.get_logger().info('Pump OFF (step complete)')
+                return True
+            return False
+
+    # =====================================================
+    # ==================  TEST_MOTOR   ====================
+    # =====================================================
+    def _test_motor_tick(self):
+        t = self._elapsed()
+        period = self.test_period_s
+        segment = int(t // period)
+        direction = 1.0 if (segment % 2) == 0 else -1.0
+
+        jt = JointTargets()
+        jt.position = [0.0, 0.0, 0.0, 0.0]
+        jt.velocity = [0.0, 0.0, 0.0, 0.0]
+        jt.use_velocity = False
+
+        servo_neutral_deg = 90.0
+        servo_low_deg, servo_high_deg = self.test_servo_deg
+        jt.position[3] = math.radians(servo_neutral_deg)
+
+        pump_msg = PumpCmd()
+        pump_msg.on = False
+        pump_msg.duty = 0.0
+        pump_msg.duration_s = 0.0
+
+        amp0, amp1, amp2 = self.test_amp_rad
+
+        if segment == 0:
+            jt.position[0] = direction * amp0
+
+        elif segment == 1:
+            jt.position[1] = direction * amp1
+
+        elif segment == 2:
+            jt.position[2] = direction * amp2
+
+        elif segment == 3:
+            angle_deg = servo_high_deg if direction > 0 else servo_low_deg
+            jt.position[3] = math.radians(angle_deg)
+
+        elif segment == 4:
+            jt.position[0] = direction * amp0
+            jt.position[1] = direction * amp1
+            jt.position[2] = direction * amp2
+            angle_deg = servo_high_deg if direction > 0 else servo_low_deg
+            jt.position[3] = math.radians(angle_deg)
+
+        else:
+            jt.position = [0.0, 0.0, 0.0, math.radians(servo_neutral_deg)]
+            pump_msg.on = True
+            pump_msg.duty = 1.0
+            pump_msg.duration_s = 0.0
+
+        # Saat TEST_MOTOR, IK loop di-_arm_tick akan dilewati (lihat _arm_tick)
+        self.pump_pub.publish(pump_msg)
+        self.arm_pub.publish(jt)
+
+    # =====================================================
+    # ==================  ARM / IK PART  ==================
+    # =====================================================
+    def _set_arm_at(self, is_at: bool):
+        if is_at:
+            if not self.arm_at:
+                self.arm_at_since = self.get_clock().now()
+            self.arm_at = True
+        else:
+            self.arm_at = False
+            self.arm_at_since = None
+
+        self.arm_at_pub.publish(Bool(data=self.arm_at))
+
+    def _set_swirl_active(self, active: bool):
+        self.swirl_active = bool(active)
+        self.swirl_pub.publish(Bool(data=self.swirl_active))
+
+    def _align_arm_phase_with_index(self):
+        # active_index == -1 -> HOME
+        if self.active_index == -1:
+            self.get_logger().info("[ROBOHAND] Moving to init pos (HOME)")
+            self._arm_enter(ArmPhase.HOME, None)
+        # 0/1/2 -> MOVE ke salah satu cupcake center
+        elif self.active_index in (0, 1, 2) and self.centers and len(self.centers) >= 3:
+            label = f"pos{self.active_index + 1}"
+            self.get_logger().info(f"[ROBOHAND] Moving to {label}")
+            self._arm_enter(ArmPhase.MOVE, np.array(self.centers[self.active_index], dtype=float))
+        else:
+            self._arm_enter(ArmPhase.WAIT, None)
+
+    def _arm_enter(self, new_phase: ArmPhase, xyz: Optional[np.ndarray]):
+        old_phase = self.arm_phase
+
+        self.arm_phase = new_phase
+        self.arm_phase_t0 = self.get_clock().now()
+        self.last_within_tol = None
+        self.des_xyz = xyz.copy() if xyz is not None else None
+
+        # reset HOME arrival log
+        if new_phase == ArmPhase.HOME:
+            self._home_done_logged = False
+
+        if new_phase != old_phase:
+            if self.des_xyz is not None:
+                self.get_logger().info(
+                    f"[ROBOHAND] Phase {old_phase.name} -> {new_phase.name}, des={self.des_xyz}"
+                )
+            else:
+                self.get_logger().info(
+                    f"[ROBOHAND] Phase {old_phase.name} -> {new_phase.name}"
+                )
+
+    def _arm_elapsed(self) -> float:
+        return (self.get_clock().now() - self.arm_phase_t0).nanoseconds * 1e-9
+
+    def _s_curve_speed(self, profile_T: float) -> float:
+        """
+        Smooth S-curve-like speed factor in [0.1, 1].
+        """
+        if profile_T <= 0.0:
+            return 1.0
+        t = self._arm_elapsed()
+        tau = max(0.0, min(t / profile_T, 1.0))
+        scale = 4.0 * tau * (1.0 - tau)
+        return max(scale, 0.1)
+
+    # ---------- FK & Jacobian ----------
+    def fk_xyz(self, q: np.ndarray) -> np.ndarray:
+        q1, q2, q3, q4 = q
+        L1, L2, L3, L4 = self.L1, self.L2, self.L3, self.L4
+        r_fk = L2*math.cos(q2) + L3*math.cos(q2+q3) + L4*math.cos(q2+q3+q4)
+        z_fk = L1 + L2*math.sin(q2) + L3*math.sin(q2+q3) + L4*math.sin(q2+q3+q4)
+        x_fk = r_fk * math.cos(q1)
+        y_fk = r_fk * math.sin(q1)
+        return np.array([x_fk, y_fk, z_fk], dtype=float)
+
+    def jacobian(self, q: np.ndarray) -> np.ndarray:
+        q1, q2, q3, q4 = q
+        L2, L3, L4 = self.L2, self.L3, self.L4
+        r_fk   = L2*math.cos(q2) + L3*math.cos(q2+q3) + L4*math.cos(q2+q3+q4)
+        dr_dq2 = -L2*math.sin(q2) - L3*math.sin(q2+q3) - L4*math.sin(q2+q3+q4)
+        dr_dq3 = -L3*math.sin(q2+q3) - L4*math.sin(q2+q3+q4)
+        dr_dq4 = -L4*math.sin(q2+q3+q4)
+        dz_dq2 =  L2*math.cos(q2) + L3*math.cos(q2+q3) + L4*math.cos(q2+q3+q4)
+        dz_dq3 =  L3*math.cos(q2+q3) + L4*math.cos(q2+q3+q4)
+        dz_dq4 =  L4*math.cos(q2+q3+q4)
+
+        J = np.zeros((3, 4))
+        J[:, 0] = [-r_fk*math.sin(q1), r_fk*math.cos(q1), 0.0]
+        J[:, 1] = [math.cos(q1)*dr_dq2, math.sin(q1)*dr_dq2, dz_dq2]
+        J[:, 2] = [math.cos(q1)*dr_dq3, math.sin(q1)*dr_dq3, dz_dq3]
+        J[:, 3] = [math.cos(q1)*dr_dq4, math.sin(q1)*dr_dq4, dz_dq4]
+        return J
+
+    def _publish_targets(self, q: np.ndarray, qdot: np.ndarray, use_velocity: bool):
+        msg = JointTargets()
+        msg.position = [float(a) for a in q]
+        msg.velocity = [float(w) for w in qdot]
+        msg.use_velocity = bool(use_velocity)
+        self.arm_pub.publish(msg)
+
+    def _home_step(self, speed_scale: float = 1.0) -> bool:
+        """Home motion di task space pakai IK yang sama."""
+        des_xyz_home = self.fk_xyz(self.q_home)
+        at = self._ik_step(des_xyz_home, xdot_ff=None, speed_scale=speed_scale)
+
+        if at and not self._home_done_logged:
+            self.get_logger().info("[ROBOHAND] Arrived at init pos (HOME)")
+            self._home_done_logged = True
+
+        return at
+
+    def _ik_step(
+        self,
+        des_xyz: np.ndarray,
+        xdot_ff: Optional[np.ndarray] = None,
+        speed_scale: float = 1.0
+    ) -> bool:
+        """Cartesian IK step dengan S-curve speed scaling."""
+        cur_xyz = self.fk_xyz(self.q)
+        err = des_xyz - cur_xyz
+        if np.linalg.norm(err) <= self.pos_tol:
+            if self.last_within_tol is None:
+                self.last_within_tol = self.get_clock().now()
+        else:
+            self.last_within_tol = None
+
+        v = self.kp * err
+        if xdot_ff is not None:
+            v = v + xdot_ff
+
+        J = self.jacobian(self.q)
+        JJt = J @ J.T
+        qdot = J.T @ np.linalg.solve(JJt + (self.lmbda**2) * np.eye(3), v)
+
+        # S-curve speed scaling
+        limit = self.qdot_lim * speed_scale
+        qdot = np.clip(qdot, -limit, limit)
+        self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
+
+        self._publish_targets(self.q, qdot, use_velocity=True)
+
+        at = (
+            self.last_within_tol is not None and
+            (self.get_clock().now() - self.last_within_tol) >= Duration(seconds=self.settle_s)
+        )
+
+        self._set_arm_at(at)
+        return at
+
+    def _start_swirl(self):
+        # siapkan spiral di sekitar center aktif
+        if self.centers is None or self.active_index not in (0, 1, 2):
+            return
+
+        label = f"pos{self.active_index + 1}"
+        self.get_logger().info(f"[ROBOHAND] Arrived at {label}, starting swirl")
+
+        self.spiral_center = np.array(self.centers[self.active_index], dtype=float)
+        self.spiral_theta = 0.0
+        self._arm_enter(ArmPhase.SWIRL, self.spiral_center.copy())
+
+    def _arm_tick(self):
+        if self.paused:
+            return
+
+        # Saat TEST_MOTOR, jangan kirim IK
+        if self.phase == Phase.TEST_MOTOR:
+            return
+
+        # HOME
+        if self.arm_phase == ArmPhase.HOME:
+            speed_scale = self._s_curve_speed(self.home_T)
+            self._home_step(speed_scale=speed_scale)
+            self._set_swirl_active(False)
+            return
+
+        # WAIT
+        if self.arm_phase == ArmPhase.WAIT:
+            self._set_arm_at(False)
+            self._set_swirl_active(False)
+            return
+
+        # MOVE
+        if self.arm_phase == ArmPhase.MOVE and self.des_xyz is not None:
+            speed_scale = self._s_curve_speed(self.move_T)
+            at = self._ik_step(self.des_xyz, speed_scale=speed_scale)
+            if at:
+                self._start_swirl()
+            self._set_swirl_active(False)
+            return
+
+        # SWIRL
+        if self.arm_phase == ArmPhase.SWIRL and self.spiral_center is not None:
+            if self.theta_max <= 0.0:
+                self._arm_enter(ArmPhase.WAIT, None)
+                self._set_swirl_active(False)
+                return
+
+            # Spiral pose
+            r = self.R0 * (1.0 + self.alpha * self.spiral_theta)
+            dx = r * math.cos(self.spiral_theta)
+            dy = r * math.sin(self.spiral_theta)
+            dz = self.s * self.spiral_theta
+            des = self.spiral_center + np.array([dx, dy, dz])
+
+            # Spiral feedforward
+            rdot = self.R0 * self.alpha * self.omega
+            xdot = rdot * math.cos(self.spiral_theta) - r * self.omega * math.sin(self.spiral_theta)
+            ydot = rdot * math.sin(self.spiral_theta) + r * self.omega * math.cos(self.spiral_theta)
+            zdot = self.s * self.omega
+            ff = np.array([xdot, ydot, zdot])
+
+            self._ik_step(des, ff, speed_scale=1.0)
+            self.spiral_theta += self.omega * self.dt
+
+            if self.spiral_theta >= self.theta_max:
+                label = f"pos{self.active_index + 1}" if self.active_index in (0, 1, 2) else "current position"
+                self.get_logger().info(f"[SWIRL] Swirl done at {label}")
+                self._arm_enter(ArmPhase.WAIT, None)
+                self._set_swirl_active(False)
+            else:
+                self.get_logger().debug("[SWIRL] Active")
+                self._set_swirl_active(True)
+            return
+
+        # default
+        self._set_arm_at(False)
+        self._set_swirl_active(False)
 
 
-def main(args=None):
-    rclpy.init(args=args)
+def main():
+    rclpy.init()
     node = StateNode()
-    try:
-        rclpy.spin(node)
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
-
-
-if __name__ == "__main__":
-    main()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
