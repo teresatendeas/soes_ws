@@ -20,6 +20,7 @@ class Phase(enum.Enum):
     ROLL_TRAY   = 5
     IDLE        = 6
     TEST_MOTOR  = 7
+    POST_STEP   = 8    # Newly Added
 
 
 class StateNode(Node):
@@ -197,6 +198,23 @@ class StateNode(Node):
         msg.on = bool(on)
         self.roller_pub.publish(msg)
 
+    def _publish_post_step_pose(self):
+        """
+        Publish a POST_STEP pose that moves the arm to a fixed safe height.
+        Since we cannot store last angles, we use a known absolute safe pose.
+        """
+        # --- DEFINE YOUR SAFE POST_STEP POSE HERE ---
+        # Example (tune these to your robot):
+        q_safe = [-0.0, -34, 1571, 502]   # <--- Cari Logging terakhir angle, terus naikin heightnya
+    
+        jt = JointTargets()
+        jt.position = q_safe
+        jt.velocity = [0.0, 0.0, 0.0, 0.0]
+        jt.use_velocity = False
+    
+        self.arm_pub.publish(jt)
+        self.get_logger().info(f"POST_STEP: moving to fixed safe pose {q_safe}")
+
     # ---------- Callbacks ----------
     def _on_at_target(self, msg: Bool):
         if msg.data:
@@ -303,10 +321,30 @@ class StateNode(Node):
 
         elif self.phase == Phase.STEP2:
             if self._run_step():
-                self.get_logger().info("STEP2 → CAMERA")
-                self._step_idx = 3
-                self._publish_index(-1)
-                self._enter(Phase.INIT_POS)
+                self.get_logger().info("STEP2 → POST_STEP")
+                self._enter(Phase.POST_STEP)
+
+        # ------------------------------
+        # POST_STEP  (safe lift)
+        # ------------------------------
+        elif self.phase == Phase.POST_STEP:
+
+            # 1 — Publish the safe lifted pose ONCE
+            if not hasattr(self, "_post_sent"):
+                self._publish_post_step_pose()
+                self._post_sent = True
+                return
+
+            # 2 — Wait until reached the POST_STEP pose
+            if not self.arm_at:
+                return
+
+            # 3 — After settle time → go to CAMERA
+            if self.arm_at_since is not None:
+                if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
+                    del self._post_sent   # reset flag
+                    self._enter(Phase.CAMERA)
+                    return
 
         # ===============================
         # CAMERA LOGIC
@@ -321,13 +359,13 @@ class StateNode(Node):
                     self._enter(Phase.ROLL_TRAY)
                 else:
                     self.get_logger().warn("Vision BAD → IDLE")
-                    self._enter(Phase.IDLE)
+                    self._enter(Phase.ROLL_TRAY)
                 return
 
             # 2. Timeout with no result
             if self._elapsed() >= self.cam_to:
                 self.get_logger().warn("Camera timeout → IDLE")
-                self._enter(Phase.IDLE)
+                self._enter(Phase.ROLL_TRAY)
                 return
 
         # ------------------------------
