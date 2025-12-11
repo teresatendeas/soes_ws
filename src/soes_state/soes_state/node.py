@@ -19,7 +19,7 @@ from soes_msgs.msg import (
 )
 
 
-# ---------------- High-level phases (dari soes_state) ----------------
+# ---------------- High-level phases ----------------
 class Phase(enum.Enum):
     INIT_POS   = 0
     STEP0      = 1
@@ -42,7 +42,7 @@ class StateNode(Node):
         self.declare_parameter("swirl_time_s", 1.0)
         self.declare_parameter("order", [0, 1, 2])  # urutan cup
 
-        # Robot kinematics (pindahan dari soes_robothand yaml)
+        # Robot kinematics
         self.declare_parameter("link_l1_m", 0.090)
         self.declare_parameter("link_l2_m", 0.110)
         self.declare_parameter("link_l3_m", 0.080)
@@ -60,7 +60,7 @@ class StateNode(Node):
         self.declare_parameter("use_vision", True)
         self.declare_parameter("vision_timeout_s", 3.0)
 
-        # Publikasi
+        # QoS
         qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
@@ -82,6 +82,9 @@ class StateNode(Node):
         self.sub_reset = self.create_subscription(
             Bool, "/state/reset", self._on_reset, 10
         )
+        self.sub_pause = self.create_subscription(
+            Bool, "/state/pause", self._on_pause, 10
+        )
         self.sub_vision_centers = self.create_subscription(
             CupcakeCenters, "/vision/centers", self._on_vision_centers, qos
         )
@@ -94,12 +97,18 @@ class StateNode(Node):
         self.last_phase: Phase = Phase.IDLE
 
         self.active_index: int = -1      # cup index; -1 = HOME
-        self.order: List[int] = self.get_parameter("order").get_parameter_value().integer_array_value
+        self.order: List[int] = (
+            self.get_parameter("order")
+            .get_parameter_value()
+            .integer_array_value
+        )
         if len(self.order) == 0:
             self.order = [0, 1, 2]
 
-        self._has_started: bool = False
+        # flags kontrol
+        self._has_started: bool = False   # pernah start sequence
         self._reset_requested: bool = False
+        self._paused: bool = False        # sedang pause atau tidak
 
         # robot joint state (rad)
         q_home_deg = self.get_parameter("q_home_deg").value
@@ -130,27 +139,54 @@ class StateNode(Node):
     # ==================== Callbacks ====================
 
     def _on_start(self, msg: Bool):
-        if msg.data:
-            self.get_logger().info("[STATE] Start sequence requested.")
-            self._has_started = True
-            self._reset_requested = False
-            self.phase = Phase.INIT_POS
-            self.active_index = -1
-            self._plan_home()
-            self._publish_phase()
+        if not msg.data:
+            return
+
+        # Jika sedang pause dan sequence sudah jalan, ini artinya RESUME
+        if self._paused and self._has_started:
+            self._paused = False
+            self.get_logger().info("[STATE] Resume from pause.")
+            return
+
+        # Start normal: mulai ulang sequence dari awal
+        self.get_logger().info("[STATE] Start sequence requested (fresh).")
+        self._has_started = True
+        self._reset_requested = False
+        self._paused = False
+        self.phase = Phase.INIT_POS
+        self.active_index = -1
+        self._plan_home()
+        self._publish_phase()
 
     def _on_reset(self, msg: Bool):
-        if msg.data:
-            self.get_logger().info("[STATE] Reset requested.")
-            self._reset_requested = True
-            self._has_started = False
-            self.phase = Phase.IDLE
-            self.active_index = -1
-            self.traj = None
-            self.traj_index = 0
-            self._pump_off()
-            self._roller_stop()
-            self._publish_phase()
+        if not msg.data:
+            return
+
+        self.get_logger().info("[STATE] Reset requested.")
+        self._reset_requested = True
+        self._has_started = False
+        self._paused = False
+
+        self.phase = Phase.IDLE
+        self.active_index = -1
+        self.traj = None
+        self.traj_index = 0
+        self._pump_off()
+        self._roller_stop()
+        self._publish_phase()
+
+    def _on_pause(self, msg: Bool):
+        if not msg.data:
+            return
+
+        # Pause hanya masuk akal kalau sudah pernah start
+        if not self._has_started:
+            self.get_logger().warn("[STATE] Pause requested but sequence not started yet.")
+            return
+
+        if not self._paused:
+            self._paused = True
+            self.get_logger().info("[STATE] Pause requested. Trajectory and phase stepping halted.")
 
     def _on_vision_centers(self, msg: CupcakeCenters):
         self.latest_centers = msg
@@ -163,6 +199,10 @@ class StateNode(Node):
     # ==================== Main timer ====================
 
     def _on_timer(self):
+        # Jika pause, jangan update apa pun
+        if self._paused:
+            return
+
         # update joint following traj
         self._step_trajectory()
 
@@ -248,7 +288,6 @@ class StateNode(Node):
 
     def _step_camera(self):
         # Di sini kamu bisa pakai vision untuk koreksi posisi tray, dsb
-        # Contoh sederhana: tunggu kualitas OK, lalu lanjut ke ROLL_TRAY
         use_vision = bool(self.get_parameter("use_vision").value)
         if not use_vision:
             self.get_logger().info("[STATE] CAMERA: vision disabled, go to ROLL_TRAY.")
@@ -259,21 +298,25 @@ class StateNode(Node):
         if self.latest_quality is None:
             return
 
-        if self.latest_quality.ok:  # field contoh; sesuaikan dengan msg kamu
+        # Sesuaikan field 'ok' dengan definisi VisionQuality kamu
+        if getattr(self.latest_quality, "ok", False):
             self.get_logger().info("[STATE] CAMERA: quality OK, go to ROLL_TRAY.")
             self.phase = Phase.ROLL_TRAY
             self._publish_phase()
 
     def _step_roll_tray(self):
         # Contoh: gerakkan roller untuk keluarin tray
-        # Sesuaikan dengan logika lamamu
         cmd = RollerCmd()
         cmd.speed_mm_s = 30.0
         cmd.distance_mm = 150.0
         cmd.relative = True
         self.pub_roller.publish(cmd)
         self.get_logger().info("[STATE] ROLL_TRAY: send roller cmd, then IDLE.")
+
+        # Sequence selesai
         self.phase = Phase.IDLE
+        self._has_started = False
+        self._paused = False
         self._publish_phase()
 
     def _step_test_motor(self):
@@ -310,7 +353,6 @@ class StateNode(Node):
             x, y, z = 0.18, 0.0, -0.13
         else:
             # Sesuaikan dengan definisi CupcakeCenters kamu
-            # Misal: centers[idx].position.x, ...
             if idx == 0:
                 x, y, z = (
                     self.latest_centers.c1.x,
@@ -339,7 +381,6 @@ class StateNode(Node):
 
     def _plan_swirl_about_current_cup(self):
         # Contoh swirl sederhana di joint-space:
-        # hanya gerakkan joint-4 (servo topping) selama swirl_time_s
         swirl_time = float(self.get_parameter("swirl_time_s").value)
         steps = max(1, int(swirl_time / self.dt))
 
@@ -374,7 +415,7 @@ class StateNode(Node):
         self.traj = q
         self.traj_index = 0
 
-    # ==================== IK (pindahan dari soes_robothand) ====================
+    # ==================== IK ====================
 
     def _ik_cartesian_target(self, x: float, y: float, z: float) -> Optional[np.ndarray]:
         """
@@ -382,7 +423,6 @@ class StateNode(Node):
         q0 = atan2(y, x)
         gunakan planar 2-link di (r, z) untuk q1, q2
         q3 = servo/topping, di-offset supaya 90 deg = center
-        Sesuaikan dengan kinematika asli soes_robothand kamu jika beda.
         """
         l1 = float(self.get_parameter("link_l1_m").value)
         l2 = float(self.get_parameter("link_l2_m").value)
@@ -409,7 +449,7 @@ class StateNode(Node):
         beta = math.atan2(L * math.sin(q2), l1 + L * math.cos(q2))
         q1 = alpha - beta
 
-        # q3: servo untuk tilt topping. Misal 90 deg = center
+        # q3: servo untuk tilt topping. 90 deg = center
         q3_center_deg = 90.0
         q3 = math.radians(q3_center_deg)
 
