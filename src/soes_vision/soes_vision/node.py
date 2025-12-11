@@ -156,9 +156,7 @@ class VisionNode(Node):
             self.get_logger().warn(f"detect_choux_from_frame failed in vis_timer: {e}")
             vis = frame.copy()
 
-        text = f"CAMERA Phase = {self.camera_phase}"
-        cv2.putText(vis, text, (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
+        # HAPUS overlay CAMERA Phase di pojok kiri atas  # <<< CHANGED
 
         try:
             cv2.imshow("soes_vision", vis)
@@ -195,18 +193,22 @@ class VisionNode(Node):
         if no_choux:
             self.get_logger().error("VISION request: no choux detected.")
 
-        # diameter estimation
+        # --- pilih 3 choux paling atas dari YOLO (cy paling kecil) ---  # <<< CHANGED
+        top3_labels = sorted(yolo_labels, key=lambda t: t[2])[:3]
+
+        # diameter estimation hanya pakai top 3 (kalau ada),
+        # sisanya fallback ke mean agar panjang tetap = len(self.diam_mean)  # <<< CHANGED
         diam_mm = []
         for i in range(len(self.diam_mean)):
-            if i < len(yolo_labels):
-                _, cx, cy, bw, bh = yolo_labels[i]
+            if i < len(top3_labels):
+                _, cx, cy, bw, bh = top3_labels[i]
                 bw = max(1e-6, float(bw))
                 est = float(self.diam_mean[i]) * (bw / max(1e-6, self.px_to_mm_ref))
                 diam_mm.append(est)
             else:
                 diam_mm.append(float(self.diam_mean[i]))
 
-        self.get_logger().info(f"[VISION] Estimated diameters (mm): {diam_mm}")
+        self.get_logger().info(f"[VISION] Estimated diameters (mm, top 3-based): {diam_mm}")
 
         msg_q = VisionQuality()
         msg_q.header.stamp = self.get_clock().now().to_msg()
@@ -216,6 +218,7 @@ class VisionNode(Node):
         if no_choux:
             msg_q.needs_human = True
         else:
+            # kalau 3 paling atas ukurannya mirip (range kecil), needs_human = False  # <<< CHANGED (logika sudah sesuai)
             msg_q.needs_human = (max(msg_q.diameter_mm) - min(msg_q.diameter_mm)) > self.tol
 
         self.get_logger().info(
