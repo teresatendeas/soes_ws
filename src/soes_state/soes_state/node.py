@@ -220,20 +220,28 @@ class StateNode(Node):
         self._step_trajectory()
 
         if self.phase == Phase.IDLE:
+            self.get_logger().info("[STATE] PHASE IDLE.")
             self._step_idle()
         elif self.phase == Phase.INIT_POS:
+            self.get_logger().info("[STATE] PHASE INIT_POS.")
             self._step_init_pos()
         elif self.phase == Phase.STEP0:
+            self.get_logger().info("[STATE] PHASE STEP0.")
             self._step_step_phase(0, Phase.STEP1)
         elif self.phase == Phase.STEP1:
+            self.get_logger().info("[STATE] PHASE STEP1.")
             self._step_step_phase(1, Phase.STEP2)
         elif self.phase == Phase.STEP2:
+            self.get_logger().info("[STATE] PHASE STEP2.")
             self._step_step_phase(2, Phase.CAMERA)
         elif self.phase == Phase.CAMERA:
+            self.get_logger().info("[STATE] PHASE CAMERA.")
             self._step_camera()
         elif self.phase == Phase.ROLL_TRAY:
+            self.get_logger().info("[STATE] PHASE ROLL_TRAY.")
             self._step_roll_tray()
         elif self.phase == Phase.TEST_MOTOR:
+            self.get_logger().info("[STATE] PHASE TEST_MOTOR.")
             self._step_test_motor()
 
     # ==================== Phase helpers ====================
