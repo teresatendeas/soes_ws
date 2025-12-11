@@ -92,7 +92,7 @@ class VisionNode(Node):
             Bool,
             '/vision/request',
             self._on_request,
-            vision_qos
+            qos
         )
 
         # open camera
