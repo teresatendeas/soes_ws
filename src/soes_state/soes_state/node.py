@@ -732,14 +732,13 @@ class StateNode(Node):
         if self.phase == Phase.TEST_MOTOR:
             return
 
-        # ---------- NEW: frame aman segera setelah keluar WAIT ----------
+        # ---------- frame aman setelah keluar WAIT ----------
         if self.just_left_wait:
-            # tahan di q_hold dengan vel = 0
             qdot_zero = np.zeros(4, dtype=float)
-            self._publish_targets(self.q_hold, qdot_zero, use_velocity=True)
+            # tahan posisi pakai POSITION mode (tidak brake mendadak)
+            self._publish_targets(self.q_hold, qdot_zero, use_velocity=False)
             self._set_arm_at(False)
             self._set_swirl_active(False)
-            # sinkronkan state internal
             self.q = self.q_hold.copy()
             self.just_left_wait = False
             return
@@ -754,11 +753,11 @@ class StateNode(Node):
 
         # WAIT
         if self.arm_phase == ArmPhase.WAIT:
-            # NEW: hold posisi dengan velocity mode 0
+            # Hold posisi pakai POSITION mode, tanpa rem keras
             self._set_arm_at(False)
             self._set_swirl_active(False)
             qdot_zero = np.zeros(4, dtype=float)
-            self._publish_targets(self.q_hold, qdot_zero, use_velocity=True)
+            self._publish_targets(self.q_hold, qdot_zero, use_velocity=False)
             return
 
         # MOVE
