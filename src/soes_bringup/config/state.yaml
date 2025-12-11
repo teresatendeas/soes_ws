@@ -13,7 +13,7 @@ soes_state:
     # --- ROLLER PARAMETERS ---
     # ========================
     roller_distance_mm: 70.0
-    roller_speed_mm_s: 17.5
+    roller_speed_mm_s: 7.0
 
     # ==========================
     # --- VISION PARAMETERS ----
