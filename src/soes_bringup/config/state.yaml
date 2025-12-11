@@ -31,7 +31,7 @@ soes_state:
     # --- ARM / IK PARAMETERS ---
     # ==========================
     rate_hz: 20.0
-    pos_tol_m: 0.01
+    pos_tol_m: 0.005
     settle_s: 0.5
 
     link_lengths_m: [0.00, 0.17, 0.14, 0.04]
