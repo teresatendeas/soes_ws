@@ -166,11 +166,14 @@ class VisionNode(Node):
         self.get_logger().debug(f"Timer incremented k={self.k}")
 
     def _on_vis_timer(self):
-        """Live camera view sejak start, TANPA YOLO di timer (ringan)."""
+        """Live camera view + YOLO prediction sejak start."""
         self.get_logger().debug("Entering _on_vis_timer")
+
+        # Masih hormati parameter visualize (bisa Kamu set true di vision.yaml)
         if not self.visualize:
             self.get_logger().debug("Visualize parameter is False, skipping visualization")
             return
+
         if self.cap is None or not self.cap.isOpened():
             self.get_logger().debug("Camera is None or not opened, skipping visualization")
             return
@@ -180,15 +183,20 @@ class VisionNode(Node):
             self.get_logger().warn("Failed to read frame from camera for visualization.")
             return
 
-        # Tidak panggil YOLO di sini supaya tidak block node lain.
-        vis = frame.copy()
+        # ==== YOLO / fallback langsung dari awal ====
+        try:
+            vis, good_cnts, yolo_labels = detect_choux_from_frame(frame)
+        except Exception as e:
+            self.get_logger().error(f"detect_choux_from_frame failed in vis_timer: {e}")
+            vis = frame.copy()
+        # ============================================
 
-        self.get_logger().debug("Overlaying CAMERA phase text on frame")
+        # Overlay tulisan CAMERA phase
         text = f"CAMERA Phase = {self.camera_phase}"
         cv2.putText(
             vis,
             text,
-            (10, 30),  # kiri atas
+            (10, 30),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.8,
             (0, 0, 255),
@@ -202,6 +210,7 @@ class VisionNode(Node):
             cv2.waitKey(1)
         except Exception as e:
             self.get_logger().warn(f"OpenCV imshow failed: {e}")
+
 
     def _on_request(self, msg: Bool):
         self.get_logger().info("VISION REQUEST received, running YOLO on one frame...")
