@@ -643,16 +643,37 @@ class StateNode(Node):
         msg.use_velocity = bool(use_velocity)
         self.arm_pub.publish(msg)
 
-    def _home_step(self, speed_scale: float = 1.0) -> bool:
-        """Home motion di task space pakai IK yang sama."""
-        des_xyz_home = self.fk_xyz(self.q_home)
-        at = self._ik_step(des_xyz_home, xdot_ff=None, speed_scale=speed_scale)
+        def _home_step(self, speed_scale: float = 1.0) -> bool:
+            err_q = self.q_home - self.q
 
-        if at and not self._home_done_logged:
-            self.get_logger().info("[ROBOHAND] Arrived at init pos (HOME)")
-            self._home_done_logged = True
+            if np.linalg.norm(err_q) <= self.home_tol:
+                if self.last_within_tol is None:
+                    self.last_within_tol = self.get_clock().now()
+            else:
+                self.last_within_tol = None
 
-        return at
+            qdot = self.kp_joint * err_q
+
+            limit = self.qdot_lim * speed_scale
+            qdot = np.clip(qdot, -limit, limit)
+
+            self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
+
+            self._publish_targets(self.q, qdot, use_velocity=True)
+
+            at = (
+                self.last_within_tol is not None
+                and (self.get_clock().now() - self.last_within_tol)
+                >= Duration(seconds=self.settle_s)
+            )
+
+            if at and not self._home_done_logged:
+                self.get_logger().info("[ROBOHAND] Arrived at init pos (HOME)")
+                self._home_done_logged = True
+
+            self._set_arm_at(at)
+            return at
+
 
     def _ik_step(
         self,
