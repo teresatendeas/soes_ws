@@ -87,9 +87,12 @@ class VisionNode(Node):
         self.quality_pub = self.create_publisher(VisionQuality, '/vision/quality', qos)
         self.soess_done_pub = self.create_publisher(Bool, '/vision/soes_done', qos)
 
-        # subscriber
+        # Subscriber (Vision Code)
         self.request_sub = self.create_subscription(
-            Bool, '/vision/request', self._on_request, qos
+            Bool,
+            '/vision/request',
+            self._on_request,
+            vision_qos
         )
 
         # open camera
