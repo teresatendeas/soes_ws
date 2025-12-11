@@ -165,17 +165,11 @@ class StateNode(Node):
         self.create_subscription(Bool, '/esp_paused', self._on_paused, 10)
 
         # Vision
-        vision_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=10
-        )
-
-        # Publisher (Main Code)
-        self.vision_request_pub = self.create_publisher(
-            Bool,
-            '/vision/request',
-            vision_qos
+        self.vision_request_pub = self.create_publisher(Bool, '/vision/request', 1)
+        self.vision_done: Optional[bool] = None
+        self.create_subscription(Bool, '/vision/soes_done', self._on_vision_done, 10)
+        self.center_sub = self.create_subscription(
+            CupcakeCenters, '/vision/centers', self._on_centers, qos
         )
 
         # Pump helper
