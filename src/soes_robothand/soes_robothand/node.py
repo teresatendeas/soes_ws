@@ -268,7 +268,7 @@ class RoboHandNode(Node):
         xdot_ff: Optional[np.ndarray] = None,
         speed_scale: float = 1.0
     ) -> bool:
-        """Cartesian IK step with S-curve speed scaling on joint velocity limits."""
+        """Cartesian IK step dengan S-curve speed scaling."""
         cur_xyz = self.fk_xyz(self.q)
         err = des_xyz - cur_xyz
         if np.linalg.norm(err) <= self.pos_tol:
@@ -285,7 +285,23 @@ class RoboHandNode(Node):
         JJt = J @ J.T
         qdot = J.T @ np.linalg.solve(JJt + (self.lmbda**2) * np.eye(3), v)
 
-        # Apply S-curve speed scaling to joint velocity limits
+        # ----- ACCELERATION LIMIT (baru) -----
+        if not hasattr(self, "prev_qdot"):
+            self.prev_qdot = np.zeros_like(qdot)
+
+        # rad/s^2 per joint (konservatif, aman untuk gearbox)
+        acc_limit = np.array([0.15, 0.12, 0.08, 10.0], dtype=float)
+        max_step = acc_limit * self.dt  # perubahan qdot maksimal per tick
+
+        qdot = np.clip(
+            qdot,
+            self.prev_qdot - max_step,
+            self.prev_qdot + max_step
+        )
+        self.prev_qdot = qdot.copy()
+        # -------------------------------------
+
+        # S-curve speed scaling + limit kecepatan
         limit = self.qdot_lim * speed_scale
         qdot = np.clip(qdot, -limit, limit)
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
@@ -297,7 +313,7 @@ class RoboHandNode(Node):
             (self.get_clock().now() - self.last_within_tol) >= Duration(seconds=self.settle_s)
         )
 
-        self._publish_at(at)
+        self._set_arm_at(at)
         return at
 
     # ------------- Phase logic -------------
