@@ -211,6 +211,9 @@ class StateNode(Node):
         self.arm_at_since = None
         self.swirl_active = False
 
+        # POST_STEP manual move flag (minimal change)
+        self._post_step_done = False
+
         # Timers
         self.timer_state = self.create_timer(0.05, self.tick)          # 20 Hz high-level
         self.timer_arm   = self.create_timer(self.dt, self._arm_tick)  # IK loop
@@ -246,6 +249,10 @@ class StateNode(Node):
         self.phase = new_phase
         self.phase_t0 = self.get_clock().now()
         self._did_start_pump = False
+
+        # minimal: reset post-step one-shot
+        if new_phase == Phase.POST_STEP:
+            self._post_step_done = False
 
         # reset roller state jika bukan ROLL_TRAY
         if new_phase != Phase.ROLL_TRAY:
@@ -406,7 +413,7 @@ class StateNode(Node):
                 self._publish_index(-1)
                 self._enter(Phase.INIT_POS)
 
-        # POST_STEP: cukup tunggu HOME settle lalu masuk CAMERA
+        # POST_STEP: cukup tunggu settle lalu masuk CAMERA
         elif self.phase == Phase.POST_STEP:
             if self.arm_at and self.arm_at_since is not None:
                 if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
@@ -710,6 +717,22 @@ class StateNode(Node):
 
         # Saat TEST_MOTOR, jangan kirim IK
         if self.phase == Phase.TEST_MOTOR:
+            return
+
+        # POST_STEP: manual move motor 2 down 30 deg (no IK)
+        if self.phase == Phase.POST_STEP and not self._post_step_done:
+            q_cmd = self.q.copy()
+            q_cmd[2] -= math.radians(30.0)
+
+            qdot = np.zeros(4, dtype=float)
+
+            self._publish_targets(q_cmd, qdot, use_velocity=False)
+
+            self.q = q_cmd
+            self._set_arm_at(True)
+            self._set_swirl_active(False)
+
+            self._post_step_done = True
             return
 
         # HOME
