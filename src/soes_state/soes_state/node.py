@@ -677,18 +677,6 @@ class StateNode(Node):
         JJt = J @ J.T
         qdot = J.T @ np.linalg.solve(JJt + (self.lmbda**2) * np.eye(3), v)
 
-        # ===== Acceleration limit (baru, minimal) =====
-        if not hasattr(self, "prev_qdot"):
-            self.prev_qdot = np.zeros_like(qdot)
-
-        # rad/s^2 per joint (aman untuk stepper + gearbox; servo dibuat longgar)
-        acc_limit = np.array([0.15, 0.12, 0.12, 10.0], dtype=float)
-        max_step = acc_limit * self.dt  # perubahan qdot maksimal per tick
-
-        qdot = np.clip(qdot, self.prev_qdot - max_step, self.prev_qdot + max_step)
-        self.prev_qdot = qdot.copy()
-        # =============================================
-
         # S-curve speed scaling
         limit = self.qdot_lim * speed_scale
         qdot = np.clip(qdot, -limit, limit)
@@ -703,7 +691,6 @@ class StateNode(Node):
 
         self._set_arm_at(at)
         return at
-
 
     def _start_swirl(self):
         # siapkan spiral di sekitar center aktif
