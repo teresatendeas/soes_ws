@@ -38,7 +38,7 @@ soes_state:
 
     kp_cart: 1.0
     damping_lambda: 0.1
-    qdot_limit_rad_s: [2.0, 1.0, 1.5, 3.0]
+    qdot_limit_rad_s: [1.5, 1.5, 1.5, 1.5]
 
     q_min_rad: [-314.16, -157.08, -157.08, -1.5708]
     q_max_rad: [ 314.16,  157.08,  157.08,  1.5708]
