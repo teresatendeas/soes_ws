@@ -215,6 +215,7 @@ class StateNode(Node):
         self._post_step_done = False
         self._post_step_t0 = None
         self._post_q_start = None
+        self._post_step_hold_sent = False
 
         # Timers
         self.timer_state = self.create_timer(0.05, self.tick)          # 20 Hz high-level
@@ -257,6 +258,14 @@ class StateNode(Node):
             self._post_step_done = False
             self._post_step_t0 = self.get_clock().now()
             self._post_q_start = self.q.copy()
+            self._post_step_hold_sent = False
+
+            # hard stop 1 tick: clear leftover velocity on ESP
+            jt = JointTargets()
+            jt.position = [float(a) for a in self.q]
+            jt.velocity = [0.0, 0.0, 0.0, 0.0]
+            jt.use_velocity = True
+            self.arm_pub.publish(jt)
 
         # reset roller state jika bukan ROLL_TRAY
         if new_phase != Phase.ROLL_TRAY:
@@ -733,6 +742,16 @@ class StateNode(Node):
             if self._post_step_t0 is None or self._post_q_start is None:
                 self._post_step_t0 = self.get_clock().now()
                 self._post_q_start = self.q.copy()
+                self._post_step_hold_sent = False
+
+            # hold 1 tick to clear leftover velocity
+            t0 = (self.get_clock().now() - self._post_step_t0).nanoseconds * 1e-9
+            if t0 < self.dt:
+                self._publish_targets(self.q, np.zeros(4, dtype=float), use_velocity=True)
+                self._set_arm_at(False)
+                self._set_swirl_active(False)
+                self._post_step_hold_sent = True
+                return
 
             if not self._post_step_done:
                 post_T = max(self.move_T, 1e-3)
@@ -753,7 +772,7 @@ class StateNode(Node):
                 qdot = np.zeros(4, dtype=float)
                 qdot[2] = ds_dt * delta[2]
 
-                # optional safety clamp (pakai limit yg sudah ada)
+                # safety clamp
                 qdot = np.clip(qdot, -self.qdot_lim, self.qdot_lim)
 
                 self._publish_targets(q_cmd, qdot, use_velocity=True)
@@ -776,7 +795,6 @@ class StateNode(Node):
             self._set_arm_at(True)
             self._set_swirl_active(False)
             return
-
 
         # HOME
         if self.arm_phase == ArmPhase.HOME:
