@@ -695,7 +695,7 @@ class StateNode(Node):
 
         self._publish_targets(self.q, qdot, use_velocity=True)
 
-at = (
+        at = (
             self.last_within_tol is not None and
             (self.get_clock().now() - self.last_within_tol) >= Duration(seconds=self.settle_s)
         )
