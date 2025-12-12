@@ -658,16 +658,70 @@ class StateNode(Node):
         msg.use_velocity = bool(use_velocity)
         self.arm_pub.publish(msg)
 
+    # ---------------------------
+    # Joint-space HOMING (SAFE)
+    # ---------------------------
     def _home_step(self, speed_scale: float = 1.0) -> bool:
-        """Home motion di task space pakai IK yang sama."""
-        des_xyz_home = self.fk_xyz(self.q_home)
-        at = self._ik_step(des_xyz_home, xdot_ff=None, speed_scale=speed_scale)
+        """
+        Homing di joint-space: move q -> q_home.
+        Lebih aman daripada IK cartesian untuk HOME.
+        """
+        err = self.q_home - self.q
+        if np.linalg.norm(err) <= self.home_tol:
+            if self.last_within_tol is None:
+                self.last_within_tol = self.get_clock().now()
+        else:
+            self.last_within_tol = None
 
-        if at and not self._home_done_logged:
-            self.get_logger().info("[ROBOHAND] Arrived at init pos (HOME)")
-            self._home_done_logged = True
+        # joint velocity command
+        qdot = self.kp_joint * err
 
-        return at
+        # speed scaling + clamp
+        limit = self.qdot_lim * speed_scale
+        qdot = np.clip(qdot, -limit, limit)
+
+        at = (
+            self.last_within_tol is not None and
+            (self.get_clock().now() - self.last_within_tol) >= Duration(seconds=self.settle_s)
+        )
+
+        # soft brake when reached
+        if at:
+            now = self.get_clock().now()
+
+            if not self._braking:
+                self._braking = True
+                self._brake_t0 = now
+                self._brake_qdot0 = qdot.copy()
+
+            T = max(self.brake_T, 1e-3)
+            t = (now - self._brake_t0).nanoseconds * 1e-9
+            k = max(0.0, 1.0 - (t / T))
+
+            qdot_cmd = self._brake_qdot0 * k
+
+            if k <= 0.0:
+                self._publish_targets(self.q, np.zeros(4, dtype=float), use_velocity=False)
+            else:
+                self.q = np.clip(self.q + qdot_cmd * self.dt, self.q_min, self.q_max)
+                self._publish_targets(self.q, qdot_cmd, use_velocity=True)
+
+            if not self._home_done_logged:
+                self.get_logger().info("[ROBOHAND] Arrived at init pos (HOME)")
+                self._home_done_logged = True
+
+            self._set_arm_at(True)
+            return True
+
+        # normal joint move
+        self._braking = False
+        self._brake_t0 = None
+
+        self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
+        self._publish_targets(self.q, qdot, use_velocity=True)
+
+        self._set_arm_at(False)
+        return False
 
     def _ik_step(
         self,
@@ -754,7 +808,7 @@ class StateNode(Node):
         if self.phase == Phase.TEST_MOTOR:
             return
 
-        # HOME
+        # HOME (JOINT-SPACE)
         if self.arm_phase == ArmPhase.HOME:
             speed_scale = self._s_curve_speed(self.home_T)
             self._home_step(speed_scale=speed_scale)
@@ -767,7 +821,7 @@ class StateNode(Node):
             self._set_swirl_active(False)
             return
 
-        # MOVE
+        # MOVE (CARTESIAN IK)
         if self.arm_phase == ArmPhase.MOVE and self.des_xyz is not None:
             speed_scale = self._s_curve_speed(self.move_T)
             at = self._ik_step(self.des_xyz, speed_scale=speed_scale)
