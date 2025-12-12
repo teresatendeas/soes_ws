@@ -689,10 +689,6 @@ class StateNode(Node):
         qdot = np.clip(qdot, -limit, limit)
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
 
-        # ---- Maintain constant global pitch for the nozzle ----
-        const_pitch = -math.pi/2   # downward
-        self.q[3] = const_pitch - (self.q[1] + self.q[2])
-
         self._publish_targets(self.q, qdot, use_velocity=True)
 
         at = (
