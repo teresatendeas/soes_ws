@@ -55,3 +55,8 @@ soes_state:
 
     move_profile_time_s: 1.0   # smoother move to cupcake
     home_profile_time_s: 1.0   # smoother move back home
+
+    # ==========================
+    # --- BRAKE PARAMETERS -----
+    # ==========================
+    brake_time_s: 0.35
