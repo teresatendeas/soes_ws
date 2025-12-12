@@ -682,7 +682,7 @@ class StateNode(Node):
             self.prev_qdot = np.zeros_like(qdot)
 
         # rad/s^2 per joint (aman untuk stepper + gearbox; servo dibuat longgar)
-        acc_limit = np.array([0.15, 0.12, 0.08, 10.0], dtype=float)
+        acc_limit = np.array([0.15, 0.12, 0.12, 10.0], dtype=float)
         max_step = acc_limit * self.dt  # perubahan qdot maksimal per tick
 
         qdot = np.clip(qdot, self.prev_qdot - max_step, self.prev_qdot + max_step)
