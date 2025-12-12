@@ -85,8 +85,6 @@ class StateNode(Node):
         self.declare_parameter('q_max_rad', [ 314.16,  157.08,  157.08,  1.5708])
 
         self.declare_parameter('q_home_rad', [0.0, 1.5708, -1.5708, 0.0])
-        self.declare_parameter('kp_joint', 3.0)
-        self.declare_parameter('home_tol_rad', 0.314)
 
         # Spiral parameters
         self.declare_parameter('R0', 0.025)
@@ -98,6 +96,9 @@ class StateNode(Node):
         # S-curve profile times
         self.declare_parameter('move_profile_time_s', 1.0)
         self.declare_parameter('home_profile_time_s', 1.0)
+
+        # Smooth-stop home (brake) time
+        self.declare_parameter('home_brake_time_s', 0.4)
 
         # ----- Load arm params -----
         self.rate_hz  = float(self.get_parameter('rate_hz').value)
@@ -115,8 +116,6 @@ class StateNode(Node):
         self.q_max    = np.array(self.get_parameter('q_max_rad').value, dtype=float)
 
         self.q_home   = np.array(self.get_parameter('q_home_rad').value, dtype=float)
-        self.kp_joint = float(self.get_parameter('kp_joint').value)
-        self.home_tol = float(self.get_parameter('home_tol_rad').value)
 
         self.R0       = float(self.get_parameter('R0').value)
         self.turns    = int(self.get_parameter('turns').value)
@@ -129,6 +128,8 @@ class StateNode(Node):
 
         self.move_T = float(self.get_parameter('move_profile_time_s').value)
         self.home_T = float(self.get_parameter('home_profile_time_s').value)
+
+        self.home_brake_T = float(self.get_parameter('home_brake_time_s').value)
 
         # =====================================================
         # ==================   ROS I/O   ======================
@@ -148,7 +149,6 @@ class StateNode(Node):
 
         self.phase_pub   = self.create_publisher(Int32, '/state/phase', 1)
 
-        # switch / pause
         self.switch_on = True
         self.create_subscription(Bool, '/esp_switch_on', self._on_switch, 10)
 
@@ -156,7 +156,6 @@ class StateNode(Node):
         self.pause_start = None
         self.create_subscription(Bool, '/esp_paused', self._on_paused, 10)
 
-        # Vision
         self.vision_request_pub = self.create_publisher(Bool, '/vision/request', 1)
         self.vision_done: Optional[bool] = None
         self.create_subscription(Bool, '/vision/soes_done', self._on_vision_done, 10)
@@ -164,48 +163,47 @@ class StateNode(Node):
         self.centers: Optional[List[Tuple[float, float, float]]] = None
         self.create_subscription(CupcakeCenters, '/vision/centers', self._on_centers, qos)
 
-        # Pump helper
         self.pump = PumpController(self._pump_on, self._pump_off)
 
         # =====================================================
         # ===================   RUNTIME   =====================
         # =====================================================
-        # High-level state
         self.phase = Phase.IDLE
         self.phase_t0 = self.get_clock().now()
 
         self._step_idx = 0
         self._did_start_pump = False
 
-        # Roller state
         self._roller_active = False
         self._roller_duration_s = 0.0
 
         # Arm runtime
         self.q: np.ndarray = np.zeros(4, dtype=float)
+        self._last_qdot_cmd = np.zeros(4, dtype=float)
 
         self.arm_phase = ArmPhase.HOME
         self.arm_phase_t0 = self.get_clock().now()
         self.last_within_tol = None
         self.des_xyz: Optional[np.ndarray] = None
 
-        # Target bookkeeping (replaces active_index)
-        self.target_idx: Optional[int] = None          # current cupcake index 0/1/2
-        self.pending_target_idx: Optional[int] = None  # if centers not ready yet
+        self.target_idx: Optional[int] = None
+        self.pending_target_idx: Optional[int] = None
 
-        # Spiral bookkeeping
         self.spiral_theta = 0.0
         self.spiral_center: Optional[np.ndarray] = None
 
-        # Arrival logging
         self._home_done_logged = False
 
-        # Arm at-target + swirl flags
         self.arm_at = False
         self.arm_at_since = None
         self.swirl_active = False
 
-        # Timers
+        # Smooth-stop braking (HOME only)
+        self._braking = False
+        self._brake_start = None
+        self._brake_qdot0 = np.zeros(4, dtype=float)
+        self._hold_sent = False
+
         self.timer_state = self.create_timer(0.05, self.tick)
         self.timer_arm   = self.create_timer(self.dt, self._arm_tick)
 
@@ -226,7 +224,6 @@ class StateNode(Node):
             self.get_logger().warn("centers < 3; waiting for all three targets")
             return
 
-        # if a target is pending, start MOVE now
         if self.pending_target_idx in (0, 1, 2):
             idx = int(self.pending_target_idx)
             self.pending_target_idx = None
@@ -294,7 +291,7 @@ class StateNode(Node):
             self.get_logger().warn('RESET pressed (HIGH -> LOW) -> INIT_POS.')
             self.pump.stop()
             self._roller_cmd(False)
-            self.swirl_active = False
+            self._set_swirl_active(False)
             self._set_arm_at(False)
             self._step_idx = 0
             self.target_idx = None
@@ -340,16 +337,12 @@ class StateNode(Node):
         if self.phase == Phase.INIT_POS:
             if self.arm_at and self.arm_at_since is not None:
                 if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
-
                     if self._step_idx == 0:
                         self._start_step(0)
-
                     elif self._step_idx == 1:
                         self._start_step(1)
-
                     elif self._step_idx == 2:
                         self._start_step(2)
-
                     else:
                         self.get_logger().info("All steps done -> POST_STEP")
                         self.target_idx = None
@@ -460,6 +453,12 @@ class StateNode(Node):
     # =====================================================
     # ==================  TARGET HELPERS  =================
     # =====================================================
+    def _reset_brake(self):
+        self._braking = False
+        self._brake_start = None
+        self._brake_qdot0 = np.zeros(4, dtype=float)
+        self._hold_sent = False
+
     def _go_home(self):
         self.target_idx = None
         self.pending_target_idx = None
@@ -544,7 +543,6 @@ class StateNode(Node):
         else:
             self.arm_at = False
             self.arm_at_since = None
-
         self.arm_at_pub.publish(Bool(data=self.arm_at))
 
     def _set_swirl_active(self, active: bool):
@@ -557,6 +555,9 @@ class StateNode(Node):
         self.arm_phase_t0 = self.get_clock().now()
         self.last_within_tol = None
         self.des_xyz = xyz.copy() if xyz is not None else None
+
+        # important: reset brake whenever arm phase changes
+        self._reset_brake()
 
         if new_phase == ArmPhase.HOME:
             self._home_done_logged = False
@@ -595,10 +596,12 @@ class StateNode(Node):
     def jacobian(self, q: np.ndarray) -> np.ndarray:
         q1, q2, q3, q4 = q
         L2, L3, L4 = self.L2, self.L3, self.L4
+
         r_fk   = L2*math.cos(q2) + L3*math.cos(q2+q3) + L4*math.cos(q2+q3+q4)
         dr_dq2 = -L2*math.sin(q2) - L3*math.sin(q2+q3) - L4*math.sin(q2+q3+q4)
         dr_dq3 = -L3*math.sin(q2+q3) - L4*math.sin(q2+q3+q4)
         dr_dq4 = -L4*math.sin(q2+q3+q4)
+
         dz_dq2 =  L2*math.cos(q2) + L3*math.cos(q2+q3) + L4*math.cos(q2+q3+q4)
         dz_dq3 =  L3*math.cos(q2+q3) + L4*math.cos(q2+q3+q4)
         dz_dq4 =  L4*math.cos(q2+q3+q4)
@@ -616,6 +619,42 @@ class StateNode(Node):
         msg.velocity = [float(w) for w in qdot]
         msg.use_velocity = bool(use_velocity)
         self.arm_pub.publish(msg)
+
+    # ---------- Smooth stop / hold at HOME ----------
+    def _home_smooth_stop_tick(self) -> bool:
+        """
+        Returns True when HOLD is active.
+        - First: ramp down last commanded qdot to 0 over home_brake_T using velocity mode.
+        - Then: switch to position hold (use_velocity=False) and keep sending hold.
+        """
+        now = self.get_clock().now()
+
+        if not self._braking:
+            self._braking = True
+            self._brake_start = now
+            self._brake_qdot0 = self._last_qdot_cmd.copy()
+            return False
+
+        T = max(self.home_brake_T, 1e-3)
+        t = (now - self._brake_start).nanoseconds * 1e-9
+        tau = max(0.0, min(t / T, 1.0))
+
+        # ease-out (fast early decel, gentle at end)
+        scale = (1.0 - tau) ** 3
+        qdot_cmd = self._brake_qdot0 * scale
+
+        if tau < 1.0:
+            # Keep integrating internal q so command stays consistent
+            self.q = np.clip(self.q + qdot_cmd * self.dt, self.q_min, self.q_max)
+            self._publish_targets(self.q, qdot_cmd, use_velocity=True)
+            self._set_arm_at(True)
+            return False
+
+        # finished braking -> HOLD position mode
+        self._publish_targets(self.q, np.zeros(4), use_velocity=False)
+        self._set_arm_at(True)
+        self._hold_sent = True
+        return True
 
     def _home_step(self, speed_scale: float = 1.0) -> bool:
         des_xyz_home = self.fk_xyz(self.q_home)
@@ -652,8 +691,10 @@ class StateNode(Node):
 
         limit = self.qdot_lim * speed_scale
         qdot = np.clip(qdot, -limit, limit)
+
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
 
+        self._last_qdot_cmd = qdot.copy()
         self._publish_targets(self.q, qdot, use_velocity=True)
 
         at = (
@@ -682,29 +723,44 @@ class StateNode(Node):
         if self.phase == Phase.TEST_MOTOR:
             return
 
+        # HOME
         if self.arm_phase == ArmPhase.HOME:
             speed_scale = self._s_curve_speed(self.home_T)
-            self._home_step(speed_scale=speed_scale)
+            at = self._home_step(speed_scale=speed_scale)
             self._set_swirl_active(False)
+
+            if at:
+                # Smooth decel then HOLD, so it doesn't keep drifting
+                holding = self._home_smooth_stop_tick()
+                if holding:
+                    # keep sending HOLD periodically (some drivers need it)
+                    self._publish_targets(self.q, np.zeros(4), use_velocity=False)
+                    self._set_arm_at(True)
+            else:
+                # not at home yet -> cancel brake state
+                self._reset_brake()
             return
 
+        # WAIT
         if self.arm_phase == ArmPhase.WAIT:
             self._set_arm_at(False)
             self._set_swirl_active(False)
             return
 
+        # MOVE
         if self.arm_phase == ArmPhase.MOVE and self.des_xyz is not None:
             speed_scale = self._s_curve_speed(self.move_T)
             at = self._ik_step(self.des_xyz, speed_scale=speed_scale)
+            self._set_swirl_active(False)
             if at:
                 self._start_swirl()
-            self._set_swirl_active(False)
             return
 
+        # SWIRL
         if self.arm_phase == ArmPhase.SWIRL and self.spiral_center is not None:
             if self.theta_max <= 0.0:
-                self._go_home()
                 self._set_swirl_active(False)
+                self._go_home()
                 return
 
             r = self.R0 * (1.0 + self.alpha * self.spiral_theta)
