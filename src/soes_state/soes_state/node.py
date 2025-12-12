@@ -88,8 +88,8 @@ class StateNode(Node):
         self.theta_max = 2.0 * math.pi * self.turns
         self.s         = (self.height / self.theta_max) if self.theta_max != 0.0 else 0.0
 
-        # INITIAL (home pose) = [0, 90, -90, 0] deg
-        self.q_home = np.array([0.0, math.radians(90.0), math.radians(-90.0), 0.0], dtype=float)
+        # INITIAL (home pose) = [0, -90, 90, 0] deg
+        self.q_home = np.array([0.0, math.radians(-90.0), math.radians(90.0), 0.0], dtype=float)
 
         # ===================== ROS I/O =====================
         qos = QoSProfile(
