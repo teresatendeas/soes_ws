@@ -211,8 +211,10 @@ class StateNode(Node):
         self.arm_at_since = None
         self.swirl_active = False
 
-        # POST_STEP manual move flag (minimal change)
+        # POST_STEP manual move (S-curve) runtime
         self._post_step_done = False
+        self._post_step_t0 = None
+        self._post_q_start = None
 
         # Timers
         self.timer_state = self.create_timer(0.05, self.tick)          # 20 Hz high-level
@@ -250,9 +252,11 @@ class StateNode(Node):
         self.phase_t0 = self.get_clock().now()
         self._did_start_pump = False
 
-        # minimal: reset post-step one-shot
+        # minimal: reset post-step one-shot + capture start for S-curve
         if new_phase == Phase.POST_STEP:
             self._post_step_done = False
+            self._post_step_t0 = self.get_clock().now()
+            self._post_q_start = self.q.copy()
 
         # reset roller state jika bukan ROLL_TRAY
         if new_phase != Phase.ROLL_TRAY:
@@ -355,6 +359,11 @@ class StateNode(Node):
                 # shift both high-level and arm timers
                 self.phase_t0 = self.phase_t0 + dt
                 self.arm_phase_t0 = self.arm_phase_t0 + dt
+
+                # shift post_step t0 too
+                if self._post_step_t0 is not None:
+                    self._post_step_t0 = self._post_step_t0 + dt
+
                 self.pause_start = None
 
         self.paused = new_state
@@ -719,21 +728,55 @@ class StateNode(Node):
         if self.phase == Phase.TEST_MOTOR:
             return
 
-        # POST_STEP: manual move motor 2 down 30 deg (no IK)
-        if self.phase == Phase.POST_STEP and not self._post_step_done:
-            q_cmd = self.q.copy()
-            q_cmd[2] -= math.radians(30.0)
+        # POST_STEP: S-curve but using velocity mode (use_velocity=True)
+        if self.phase == Phase.POST_STEP:
+            if self._post_step_t0 is None or self._post_q_start is None:
+                self._post_step_t0 = self.get_clock().now()
+                self._post_q_start = self.q.copy()
 
+            if not self._post_step_done:
+                post_T = max(self.move_T, 1e-3)
+                t = (self.get_clock().now() - self._post_step_t0).nanoseconds * 1e-9
+                tau = max(0.0, min(t / post_T, 1.0))
+
+                # smoothstep position profile: s = 3t^2 - 2t^3
+                s = (3.0 * tau * tau) - (2.0 * tau * tau * tau)
+
+                # derivative for velocity shaping: ds/dt = (6t - 6t^2)/T
+                ds_dt = (6.0 * tau - 6.0 * tau * tau) / post_T
+
+                q_start = self._post_q_start
+                delta = np.zeros(4, dtype=float)
+                delta[2] = -math.radians(30.0)
+
+                q_cmd = q_start + s * delta
+                qdot = np.zeros(4, dtype=float)
+                qdot[2] = ds_dt * delta[2]
+
+                # optional safety clamp (pakai limit yg sudah ada)
+                qdot = np.clip(qdot, -self.qdot_lim, self.qdot_lim)
+
+                self._publish_targets(q_cmd, qdot, use_velocity=True)
+
+                # keep internal q consistent
+                self.q = np.clip(q_cmd, self.q_min, self.q_max)
+
+                if tau >= 1.0:
+                    self._post_step_done = True
+                    self._set_arm_at(True)
+                else:
+                    self._set_arm_at(False)
+
+                self._set_swirl_active(False)
+                return
+
+            # done: hold (zero vel)
             qdot = np.zeros(4, dtype=float)
-
-            self._publish_targets(q_cmd, qdot, use_velocity=False)
-
-            self.q = q_cmd
+            self._publish_targets(self.q, qdot, use_velocity=True)
             self._set_arm_at(True)
             self._set_swirl_active(False)
-
-            self._post_step_done = True
             return
+
 
         # HOME
         if self.arm_phase == ArmPhase.HOME:
