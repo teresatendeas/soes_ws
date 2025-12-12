@@ -606,11 +606,19 @@ class StateNode(Node):
         return max(scale, 0.1)
 
     def _publish_targets(self, q: np.ndarray, qdot: np.ndarray, use_velocity: bool):
+        if self.active_index == 4:
+            q_cmd = np.array([q[0], -q[1], -q[2], -q[3]], dtype=float)
+            qd_cmd = np.array([qdot[0], -qdot[1], -qdot[2], -qdot[3]], dtype=float)
+        else:
+            q_cmd = q
+            qd_cmd = qdot
+    
         msg = JointTargets()
-        msg.position = [float(a) for a in q]
-        msg.velocity = [float(w) for w in qdot]
+        msg.position = [float(a) for a in q_cmd]
+        msg.velocity = [float(w) for w in qd_cmd]
         msg.use_velocity = bool(use_velocity)
         self.arm_pub.publish(msg)
+
 
     def _wrap_pi(self, a: float) -> float:
         return (a + math.pi) % (2.0 * math.pi) - math.pi
