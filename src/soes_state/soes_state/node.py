@@ -100,13 +100,6 @@ class StateNode(Node):
         self.declare_parameter('move_profile_time_s', 1.0)
         self.declare_parameter('home_profile_time_s', 1.0)
 
-        # ===== POST_STEP joint backoff (minimal addition) =====
-        # Move joint-2 (index 1) by -30 deg smoothly before CAMERA
-        self.declare_parameter('post_step_back_deg', 30.0)
-        self.declare_parameter('post_step_back_time_s', 1.0)
-        self.post_back_rad = math.radians(float(self.get_parameter('post_step_back_deg').value))
-        self.post_back_T   = float(self.get_parameter('post_step_back_time_s').value)
-
         # ----- Load arm params -----
         self.rate_hz  = float(self.get_parameter('rate_hz').value)
         self.dt       = 1.0 / self.rate_hz
@@ -218,12 +211,6 @@ class StateNode(Node):
         self.arm_at_since = None
         self.swirl_active = False
 
-        # ===== POST_STEP backoff runtime (minimal addition) =====
-        self._post_back_active = False
-        self._post_back_t0 = self.get_clock().now()
-        self._post_back_q_start: Optional[np.ndarray] = None
-        self._post_back_q_target: Optional[np.ndarray] = None
-
         # Timers
         self.timer_state = self.create_timer(0.05, self.tick)          # 20 Hz high-level
         self.timer_arm   = self.create_timer(self.dt, self._arm_tick)  # IK loop
@@ -264,12 +251,6 @@ class StateNode(Node):
         if new_phase != Phase.ROLL_TRAY:
             self._roller_active = False
             self._roller_duration_s = 0.0
-
-        # reset post-step backoff state jika keluar POST_STEP
-        if new_phase != Phase.POST_STEP:
-            self._post_back_active = False
-            self._post_back_q_start = None
-            self._post_back_q_target = None
 
         # Vision request jika CAMERA
         if new_phase == Phase.CAMERA:
@@ -318,71 +299,6 @@ class StateNode(Node):
         msg = RollerCmd()
         msg.on = bool(on)
         self.roller_pub.publish(msg)
-
-    def _phase_settle_done(self) -> bool:
-        return (
-            self.arm_at and
-            self.arm_at_since is not None and
-            (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle)
-        )
-
-    def _smoothstep5(self, u: float) -> float:
-        u = max(0.0, min(1.0, u))
-        return 10.0*u**3 - 15.0*u**4 + 6.0*u**5
-
-    def _publish_position_hold(self, q_cmd: np.ndarray):
-        jt = JointTargets()
-        jt.position = [float(a) for a in q_cmd]
-        jt.velocity = [0.0, 0.0, 0.0, 0.0]
-        jt.use_velocity = False
-        self.arm_pub.publish(jt)
-
-    def _post_step_backoff_tick(self) -> bool:
-        """
-        Joint-space backoff in POST_STEP.
-        Returns True when finished.
-        """
-        if not self._post_back_active:
-            self._post_back_active = True
-            self._post_back_t0 = self.get_clock().now()
-            self._post_back_q_start = self.q.copy()
-            self._post_back_q_target = self.q.copy()
-            # move joint-2 (index 1) backward by 30 deg
-            self._post_back_q_target[1] = float(self._post_back_q_target[1] - self.post_back_rad)
-            self._post_back_q_target = np.clip(self._post_back_q_target, self.q_min, self.q_max)
-
-            # stop IK from marking at-target while we backoff
-            self._set_arm_at(False)
-            self._set_swirl_active(False)
-            return False
-
-        t = (self.get_clock().now() - self._post_back_t0).nanoseconds * 1e-9
-        T = max(self.post_back_T, 1e-3)
-        u = t / T
-
-        s = self._smoothstep5(u)
-
-        qs = self._post_back_q_start
-        qt = self._post_back_q_target
-        if qs is None or qt is None:
-            return True
-
-        q_cmd = qs + s * (qt - qs)
-        q_cmd = np.clip(q_cmd, self.q_min, self.q_max)
-
-        # publish smooth position command
-        self._publish_position_hold(q_cmd)
-
-        # keep internal q consistent
-        self.q = q_cmd.copy()
-
-        if u >= 1.0:
-            self._set_arm_at(True)
-            self._set_swirl_active(False)
-            self._post_back_active = False
-            return True
-
-        return False
 
     # =====================================================
     # ==================  SWITCH / PAUSE  =================
@@ -433,10 +349,6 @@ class StateNode(Node):
                 self.phase_t0 = self.phase_t0 + dt
                 self.arm_phase_t0 = self.arm_phase_t0 + dt
                 self.pause_start = None
-
-                # also shift post-step motion timer if active
-                if self._post_back_active:
-                    self._post_back_t0 = self._post_back_t0 + dt
 
         self.paused = new_state
 
@@ -494,11 +406,10 @@ class StateNode(Node):
                 self._publish_index(-1)
                 self._enter(Phase.INIT_POS)
 
-        # POST_STEP: tunggu HOME settle, lalu backoff joint-2 30deg smooth, baru CAMERA
+        # POST_STEP: cukup tunggu HOME settle lalu masuk CAMERA
         elif self.phase == Phase.POST_STEP:
-            if self._phase_settle_done():
-                done = self._post_step_backoff_tick()
-                if done:
+            if self.arm_at and self.arm_at_since is not None:
+                if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
                     self._enter(Phase.CAMERA)
 
         # CAMERA: tunggu vision_done atau timeout
@@ -799,10 +710,6 @@ class StateNode(Node):
 
         # Saat TEST_MOTOR, jangan kirim IK
         if self.phase == Phase.TEST_MOTOR:
-            return
-
-        # Saat POST_STEP backoff, jangan kirim IK (biar tidak overwrite command)
-        if self.phase == Phase.POST_STEP and self._post_back_active:
             return
 
         # HOME
