@@ -196,10 +196,13 @@ class StateNode(Node):
 
         # Arm / IK runtime
         self.q: np.ndarray = np.zeros(4, dtype=float)
-        self.active_index: int = -1
+
+        # --------- CHANGE #1: startup HOLD ---------
+        self.active_index: int = 3
         self.centers: Optional[List[Tuple[float, float, float]]] = None
 
-        self.arm_phase = ArmPhase.HOME
+        # --------- CHANGE #2: startup WAIT (no motion) ---------
+        self.arm_phase = ArmPhase.WAIT
         self.arm_phase_t0 = self.get_clock().now()
         self.last_within_tol = None
         self.des_xyz: Optional[np.ndarray] = None
@@ -227,6 +230,9 @@ class StateNode(Node):
         # Timers
         self.timer_state = self.create_timer(0.05, self.tick)          # 20 Hz high-level
         self.timer_arm   = self.create_timer(self.dt, self._arm_tick)  # IK loop
+
+        # --------- CHANGE #3: publish HOLD once at startup ---------
+        self._publish_index(3)
 
         self.get_logger().info('soes_state: ready (IDLE, waiting RESET LOW).')
         self._publish_phase()
@@ -260,12 +266,10 @@ class StateNode(Node):
         self.phase_t0 = self.get_clock().now()
         self._did_start_pump = False
 
-        # reset roller state jika bukan ROLL_TRAY
         if new_phase != Phase.ROLL_TRAY:
             self._roller_active = False
             self._roller_duration_s = 0.0
 
-        # Vision request jika CAMERA
         if new_phase == Phase.CAMERA:
             self.vision_done = None
             req = Bool()
@@ -273,7 +277,6 @@ class StateNode(Node):
             self.vision_request_pub.publish(req)
             self.get_logger().info('CAMERA: sent /vision/request = True, waiting /vision/soes_done')
 
-        # Log overall
         self.get_logger().warn(f'[OVERALL] {old_phase.name} → {new_phase.name}')
         self.get_logger().info(f'[STATE] -> {self.phase.name}')
         self._publish_phase()
@@ -320,7 +323,6 @@ class StateNode(Node):
         prev = self.switch_on
         self.switch_on = bool(msg.data)
 
-        # HIGH -> LOW : tombol ditekan -> RESET & mulai sequence
         if prev and not self.switch_on:
             self.get_logger().warn('RESET pressed (HIGH -> LOW) -> INIT_POS.')
             self.pump.stop()
@@ -329,18 +331,16 @@ class StateNode(Node):
             self._set_arm_at(False)
             self._step_idx = 0
 
-            # start with HOME
             self._home_requested = True
             self._publish_index(-1)
             self._enter(Phase.INIT_POS)
 
-        # LOW -> HIGH : tombol dilepas -> kembali ke IDLE (hold)
         elif (not prev) and self.switch_on:
             self.get_logger().warn('RESET released (LOW -> HIGH) -> IDLE.')
             self.pump.stop()
             self._roller_cmd(False)
             self._home_requested = False
-            self._publish_index(3)  # HOLD
+            self._publish_index(3)
             self._enter(Phase.IDLE)
 
     def _on_paused(self, msg: Bool):
@@ -372,7 +372,6 @@ class StateNode(Node):
             self._test_motor_tick()
             return
 
-        # INIT_POS: tunggu HOME settle. kalau tidak sedang butuh HOME, HOLD (index=3)
         if self.phase == Phase.INIT_POS:
             if not self._home_requested:
                 if self.active_index != 3:
@@ -382,21 +381,17 @@ class StateNode(Node):
             if self.arm_at and self.arm_at_since is not None:
                 if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
 
-                    # home selesai, lanjut step berikutnya
                     self._home_requested = False
 
                     if self._step_idx == 0:
                         self._start_step(0)
-
                     elif self._step_idx == 1:
                         self._start_step(1)
-
                     elif self._step_idx == 2:
                         self._start_step(2)
-
                     else:
                         self.get_logger().info("All steps done -> POST_STEP")
-                        self._publish_index(3)  # HOLD
+                        self._publish_index(3)
                         self._enter(Phase.POST_STEP)
 
         elif self.phase == Phase.STEP0:
@@ -417,15 +412,12 @@ class StateNode(Node):
                 self._step_idx = 3
                 self._enter(Phase.INIT_POS)
 
-        # POST_STEP: HOLD lalu masuk CAMERA
         elif self.phase == Phase.POST_STEP:
             if self.active_index != 3:
                 self._publish_index(3)
-
             if self._elapsed() >= self.t_settle:
                 self._enter(Phase.CAMERA)
 
-        # CAMERA: tunggu vision_done atau timeout (arm HOLD)
         elif self.phase == Phase.CAMERA:
             if self.active_index != 3:
                 self._publish_index(3)
@@ -444,7 +436,6 @@ class StateNode(Node):
                 self._enter(Phase.ROLL_TRAY)
                 return
 
-        # ROLL_TRAY (arm HOLD)
         elif self.phase == Phase.ROLL_TRAY:
             if self.active_index != 3:
                 self._publish_index(3)
@@ -466,7 +457,7 @@ class StateNode(Node):
 
                 self._step_idx = 0
                 self._home_requested = True
-                self._publish_index(-1)  # go HOME at start of next cycle
+                self._publish_index(-1)
                 self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.IDLE:
@@ -528,24 +519,19 @@ class StateNode(Node):
 
         if segment == 0:
             jt.position[0] = direction * amp0
-
         elif segment == 1:
             jt.position[1] = direction * amp1
-
         elif segment == 2:
             jt.position[2] = direction * amp2
-
         elif segment == 3:
             angle_deg = servo_high_deg if direction > 0 else servo_low_deg
             jt.position[3] = math.radians(angle_deg)
-
         elif segment == 4:
             jt.position[0] = direction * amp0
             jt.position[1] = direction * amp1
             jt.position[2] = direction * amp2
             angle_deg = servo_high_deg if direction > 0 else servo_low_deg
             jt.position[3] = math.radians(angle_deg)
-
         else:
             jt.position = [0.0, 0.0, 0.0, math.radians(servo_neutral_deg)]
             pump_msg.on = True
@@ -574,17 +560,12 @@ class StateNode(Node):
         self.swirl_pub.publish(Bool(data=self.swirl_active))
 
     def _align_arm_phase_with_index(self):
-        # active_index == -1 -> HOME
         if self.active_index == -1:
             self.get_logger().info("[ROBOHAND] Moving to init pos (HOME)")
             self._arm_enter(ArmPhase.HOME, None)
-
-        # active_index == 3 -> HOLD (no motion)
         elif self.active_index == 3:
             self.get_logger().info("[ROBOHAND] HOLD (active_index=3)")
             self._arm_enter(ArmPhase.WAIT, None)
-
-        # 0/1/2 -> MOVE ke salah satu cupcake center
         elif self.active_index in (0, 1, 2) and self.centers and len(self.centers) >= 3:
             label = f"pos{self.active_index + 1}"
             self.get_logger().info(f"[ROBOHAND] Moving to {label}")
@@ -600,7 +581,6 @@ class StateNode(Node):
         self.last_within_tol = None
         self.des_xyz = xyz.copy() if xyz is not None else None
 
-        # reset braking whenever phase changes
         self._braking = False
         self._brake_t0 = None
         self._brake_qdot0 = np.zeros(4, dtype=float)
@@ -798,22 +778,18 @@ class StateNode(Node):
         if self.phase == Phase.TEST_MOTOR:
             return
 
-        # HOME
         if self.arm_phase == ArmPhase.HOME:
             speed_scale = self._s_curve_speed(self.home_T)
             self._home_step(speed_scale=speed_scale)
             self._set_swirl_active(False)
             return
 
-        # WAIT/HOLD (active_index=3)
         if self.arm_phase == ArmPhase.WAIT:
-            # actively hold current pose
             self._publish_targets(self.q, np.zeros(4, dtype=float), use_velocity=False)
             self._set_arm_at(False)
             self._set_swirl_active(False)
             return
 
-        # MOVE
         if self.arm_phase == ArmPhase.MOVE and self.des_xyz is not None:
             speed_scale = self._s_curve_speed(self.move_T)
             at = self._ik_step(self.des_xyz, speed_scale=speed_scale)
@@ -822,7 +798,6 @@ class StateNode(Node):
             self._set_swirl_active(False)
             return
 
-        # SWIRL
         if self.arm_phase == ArmPhase.SWIRL and self.spiral_center is not None:
             if self.theta_max <= 0.0:
                 self._arm_enter(ArmPhase.WAIT, None)
@@ -848,7 +823,6 @@ class StateNode(Node):
                 label = f"pos{self.active_index + 1}" if self.active_index in (0, 1, 2) else "current position"
                 self.get_logger().info(f"[SWIRL] Swirl done at {label}")
 
-                # NEW: only here we request HOME
                 self._home_requested = True
                 self._publish_index(-1)
 
