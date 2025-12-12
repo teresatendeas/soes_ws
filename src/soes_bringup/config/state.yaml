@@ -30,13 +30,13 @@ soes_state:
     # ==========================
     # --- ARM / IK PARAMETERS ---
     # ==========================
-    rate_hz: 100.0
+    rate_hz: 20.0
     pos_tol_m: 0.005
-    settle_s: 0.01
+    settle_s: 0.5
 
     link_lengths_m: [0.00, 0.17, 0.14, 0.04]
 
-    kp_cart: 0.5
+    kp_cart: 1.0
     damping_lambda: 0.1
     qdot_limit_rad_s: [1.5, 1.5, 1.5, 1.5]
 
@@ -55,8 +55,3 @@ soes_state:
 
     move_profile_time_s: 1.0   # smoother move to cupcake
     home_profile_time_s: 1.0   # smoother move back home
-
-    # ==========================
-    # --- BRAKE PARAMETERS -----
-    # ==========================
-    brake_time_s: 0.35
