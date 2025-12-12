@@ -130,7 +130,13 @@ class VisionNode(Node):
         msg_c.header.frame_id = self.frame_id
         msg_c.frame_id = self.frame_id
 
-        for (x, y, z) in self.centers:
+        for i, (x, y, z) in enumerate(self.centers):
+            # DEBUG log supaya tidak spam, aktifkan via:
+            # --ros-args --log-level soes_vision:=debug
+            self.get_logger().debug(
+                f"[VISION] Centers[{i}] = x={x:.3f} m, y={y:.3f} m, z={z:.3f} m"
+            )
+
             p = Point()
             p.x = float(x)
             p.y = float(y)
@@ -157,7 +163,7 @@ class VisionNode(Node):
             vis = frame.copy()
             yolo_labels = []
 
-        # ===== highlight 3 top choux in BLUE =====    # <<< CHANGED
+        # ===== highlight 3 top choux in BLUE =====
         if len(yolo_labels) > 0:
             # sort by cy ascending (paling atas dulu)
             top3 = sorted(yolo_labels, key=lambda t: t[2])[:3]
@@ -184,7 +190,6 @@ class VisionNode(Node):
             cv2.waitKey(1)
         except Exception:
             pass
-
 
     # -------------- request handler → detect once --------------
     def _on_request(self, msg: Bool):
@@ -215,11 +220,18 @@ class VisionNode(Node):
         if no_choux:
             self.get_logger().error("VISION request: no choux detected.")
 
-        # --- pilih 3 choux paling atas dari YOLO (cy paling kecil) ---  # <<< CHANGED
+        # --- pilih 3 choux paling atas dari YOLO (cy paling kecil) ---
         top3_labels = sorted(yolo_labels, key=lambda t: t[2])[:3]
 
+        # --- log posisi 3 choux paling atas (pixel) ---
+        for i, (_, cx, cy, bw, bh) in enumerate(top3_labels):
+            self.get_logger().info(
+                f"[VISION] Choux {i+1} pos_px = (cx={cx:.1f}, cy={cy:.1f}), "
+                f"bbox = (w={bw:.1f}, h={bh:.1f})"
+            )
+
         # diameter estimation hanya pakai top 3 (kalau ada),
-        # sisanya fallback ke mean agar panjang tetap = len(self.diam_mean)  # <<< CHANGED
+        # sisanya fallback ke mean agar panjang tetap = len(self.diam_mean)
         diam_mm = []
         for i in range(len(self.diam_mean)):
             if i < len(top3_labels):
@@ -229,6 +241,15 @@ class VisionNode(Node):
                 diam_mm.append(est)
             else:
                 diam_mm.append(float(self.diam_mean[i]))
+
+        # --- log diameter per choux ---
+        for i, d in enumerate(diam_mm):
+            self.get_logger().info(f"[VISION] Choux {i+1} diameter_est = {d:.2f} mm")
+
+        self.get_logger().info(
+            f"[VISION] Diameter range = {max(diam_mm) - min(diam_mm):.2f} mm, "
+            f"tol = {self.tol:.2f} mm"
+        )
 
         self.get_logger().info(f"[VISION] Estimated diameters (mm, top 3-based): {diam_mm}")
 
@@ -240,7 +261,7 @@ class VisionNode(Node):
         if no_choux:
             msg_q.needs_human = True
         else:
-            # kalau 3 paling atas ukurannya mirip (range kecil), needs_human = False  # <<< CHANGED (logika sudah sesuai)
+            # kalau 3 paling atas ukurannya mirip (range kecil), needs_human = False
             msg_q.needs_human = (max(msg_q.diameter_mm) - min(msg_q.diameter_mm)) > self.tol
 
         self.get_logger().info(
@@ -281,7 +302,6 @@ def draw_detected(img, cnts, color=(0, 255, 0)):
         cv2.circle(out, center, r, color, 3)
         cv2.putText(out, f"Choux {i}", (center[0] - 40, center[1] - r - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-        # tidak perlu logging per contour supaya tidak spam
     return out
 
 
