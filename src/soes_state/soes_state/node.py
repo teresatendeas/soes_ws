@@ -100,6 +100,10 @@ class StateNode(Node):
         # Smooth-stop home (brake) time
         self.declare_parameter('home_brake_time_s', 0.4)
 
+        # --------- MINIMAL ADD: approach slow-down before arriving ---------
+        self.declare_parameter('approach_slow_radius_m', 0.06)   # start slowing down within this radius
+        self.declare_parameter('approach_min_scale', 0.12)       # minimum speed scale near target
+
         # ----- Load arm params -----
         self.rate_hz  = float(self.get_parameter('rate_hz').value)
         self.dt       = 1.0 / self.rate_hz
@@ -130,6 +134,10 @@ class StateNode(Node):
         self.home_T = float(self.get_parameter('home_profile_time_s').value)
 
         self.home_brake_T = float(self.get_parameter('home_brake_time_s').value)
+
+        # --------- MINIMAL ADD: load approach params ---------
+        self.slow_R = float(self.get_parameter('approach_slow_radius_m').value)
+        self.slow_min = float(self.get_parameter('approach_min_scale').value)
 
         # =====================================================
         # ==================   ROS I/O   ======================
@@ -198,7 +206,7 @@ class StateNode(Node):
         self.arm_at_since = None
         self.swirl_active = False
 
-        # Smooth-stop braking (HOME only)
+        # Smooth-stop braking (HOME only) (kept as-is)
         self._braking = False
         self._brake_start = None
         self._brake_qdot0 = np.zeros(4, dtype=float)
@@ -556,7 +564,7 @@ class StateNode(Node):
         self.last_within_tol = None
         self.des_xyz = xyz.copy() if xyz is not None else None
 
-        # important: reset brake whenever arm phase changes
+        # kept as-is
         self._reset_brake()
 
         if new_phase == ArmPhase.HOME:
@@ -582,6 +590,17 @@ class StateNode(Node):
         tau = max(0.0, min(t / profile_T, 1.0))
         scale = 4.0 * tau * (1.0 - tau)
         return max(scale, 0.1)
+
+    # --------- MINIMAL ADD: approach slow-down scale ---------
+    def _approach_speed_scale(self, des_xyz: np.ndarray) -> float:
+        cur_xyz = self.fk_xyz(self.q)
+        d = float(np.linalg.norm(des_xyz - cur_xyz))
+        if self.slow_R <= 1e-6:
+            return 1.0
+        tau = max(0.0, min(d / self.slow_R, 1.0))  # 0 near, 1 far
+        # smoothstep
+        s = tau * tau * (3.0 - 2.0 * tau)
+        return max(self.slow_min, s)
 
     # ---------- FK & Jacobian ----------
     def fk_xyz(self, q: np.ndarray) -> np.ndarray:
@@ -620,13 +639,8 @@ class StateNode(Node):
         msg.use_velocity = bool(use_velocity)
         self.arm_pub.publish(msg)
 
-    # ---------- Smooth stop / hold at HOME ----------
+    # ---------- Smooth stop / hold at HOME (kept as-is, but we won't use it in HOME anymore) ----------
     def _home_smooth_stop_tick(self) -> bool:
-        """
-        Returns True when HOLD is active.
-        - First: ramp down last commanded qdot to 0 over home_brake_T using velocity mode.
-        - Then: switch to position hold (use_velocity=False) and keep sending hold.
-        """
         now = self.get_clock().now()
 
         if not self._braking:
@@ -639,18 +653,15 @@ class StateNode(Node):
         t = (now - self._brake_start).nanoseconds * 1e-9
         tau = max(0.0, min(t / T, 1.0))
 
-        # ease-out (fast early decel, gentle at end)
         scale = (1.0 - tau) ** 3
         qdot_cmd = self._brake_qdot0 * scale
 
         if tau < 1.0:
-            # Keep integrating internal q so command stays consistent
             self.q = np.clip(self.q + qdot_cmd * self.dt, self.q_min, self.q_max)
             self._publish_targets(self.q, qdot_cmd, use_velocity=True)
             self._set_arm_at(True)
             return False
 
-        # finished braking -> HOLD position mode
         self._publish_targets(self.q, np.zeros(4), use_velocity=False)
         self._set_arm_at(True)
         self._hold_sent = True
@@ -725,20 +736,20 @@ class StateNode(Node):
 
         # HOME
         if self.arm_phase == ArmPhase.HOME:
-            speed_scale = self._s_curve_speed(self.home_T)
-            at = self._home_step(speed_scale=speed_scale)
+            # --------- MINIMAL CHANGE: slow down BEFORE arriving (distance-based) ---------
+            des_xyz_home = self.fk_xyz(self.q_home)
+            speed_time = self._s_curve_speed(self.home_T)
+            speed_dist = self._approach_speed_scale(des_xyz_home)
+            speed_scale = min(speed_time, speed_dist)
+
+            at = self._ik_step(des_xyz_home, xdot_ff=None, speed_scale=speed_scale)
             self._set_swirl_active(False)
 
+            # --------- MINIMAL CHANGE: once at, HOLD (no brake-after-arrived) ---------
             if at:
-                # Smooth decel then HOLD, so it doesn't keep drifting
-                holding = self._home_smooth_stop_tick()
-                if holding:
-                    # keep sending HOLD periodically (some drivers need it)
-                    self._publish_targets(self.q, np.zeros(4), use_velocity=False)
-                    self._set_arm_at(True)
-            else:
-                # not at home yet -> cancel brake state
-                self._reset_brake()
+                self._publish_targets(self.q, np.zeros(4), use_velocity=False)
+                self._set_arm_at(True)
+
             return
 
         # WAIT
@@ -749,7 +760,11 @@ class StateNode(Node):
 
         # MOVE
         if self.arm_phase == ArmPhase.MOVE and self.des_xyz is not None:
-            speed_scale = self._s_curve_speed(self.move_T)
+            # --------- MINIMAL CHANGE: slow down BEFORE arriving at MOVE target ---------
+            speed_time = self._s_curve_speed(self.move_T)
+            speed_dist = self._approach_speed_scale(self.des_xyz)
+            speed_scale = min(speed_time, speed_dist)
+
             at = self._ik_step(self.des_xyz, speed_scale=speed_scale)
             self._set_swirl_active(False)
             if at:
