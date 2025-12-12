@@ -100,6 +100,9 @@ class StateNode(Node):
         self.declare_parameter('move_profile_time_s', 1.0)
         self.declare_parameter('home_profile_time_s', 1.0)
 
+        # Brake parameters (soft stop)
+        self.declare_parameter('brake_time_s', 0.35)
+
         # ----- Load arm params -----
         self.rate_hz  = float(self.get_parameter('rate_hz').value)
         self.dt       = 1.0 / self.rate_hz
@@ -130,6 +133,8 @@ class StateNode(Node):
 
         self.move_T = float(self.get_parameter('move_profile_time_s').value)
         self.home_T = float(self.get_parameter('home_profile_time_s').value)
+
+        self.brake_T = float(self.get_parameter('brake_time_s').value)
 
         # =====================================================
         # ==================   ROS I/O   ======================
@@ -210,6 +215,11 @@ class StateNode(Node):
         self.arm_at = False
         self.arm_at_since = None
         self.swirl_active = False
+
+        # Braking state (soft stop)
+        self._braking = False
+        self._brake_t0 = None
+        self._brake_qdot0 = np.zeros(4, dtype=float)
 
         # Timers
         self.timer_state = self.create_timer(0.05, self.tick)          # 20 Hz high-level
@@ -580,6 +590,11 @@ class StateNode(Node):
         self.last_within_tol = None
         self.des_xyz = xyz.copy() if xyz is not None else None
 
+        # reset braking whenever phase changes
+        self._braking = False
+        self._brake_t0 = None
+        self._brake_qdot0 = np.zeros(4, dtype=float)
+
         # reset HOME arrival log
         if new_phase == ArmPhase.HOME:
             self._home_done_logged = False
@@ -680,17 +695,44 @@ class StateNode(Node):
         # S-curve speed scaling
         limit = self.qdot_lim * speed_scale
         qdot = np.clip(qdot, -limit, limit)
-        self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
-
-        self._publish_targets(self.q, qdot, use_velocity=True)
 
         at = (
             self.last_within_tol is not None and
             (self.get_clock().now() - self.last_within_tol) >= Duration(seconds=self.settle_s)
         )
 
-        self._set_arm_at(at)
-        return at
+        # -------- Soft braking when "at" --------
+        if at:
+            now = self.get_clock().now()
+
+            if not self._braking:
+                self._braking = True
+                self._brake_t0 = now
+                self._brake_qdot0 = qdot.copy()
+
+            T = max(self.brake_T, 1e-3)
+            t = (now - self._brake_t0).nanoseconds * 1e-9
+            k = max(0.0, 1.0 - (t / T))  # linear ramp down
+
+            qdot_cmd = self._brake_qdot0 * k
+
+            if k <= 0.0:
+                self._publish_targets(self.q, np.zeros(4, dtype=float), use_velocity=False)
+            else:
+                self._publish_targets(self.q, qdot_cmd, use_velocity=True)
+
+            self._set_arm_at(True)
+            return True
+
+        # -------- Normal IK when not "at" --------
+        self._braking = False
+        self._brake_t0 = None
+
+        self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
+        self._publish_targets(self.q, qdot, use_velocity=True)
+
+        self._set_arm_at(False)
+        return False
 
     def _start_swirl(self):
         # siapkan spiral di sekitar center aktif
