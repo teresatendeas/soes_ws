@@ -728,7 +728,7 @@ class StateNode(Node):
         if self.phase == Phase.TEST_MOTOR:
             return
 
-        # POST_STEP: S-curve joint interpolation for motor 2 down 30 deg (no IK)
+        # POST_STEP: S-curve but using velocity mode (use_velocity=True)
         if self.phase == Phase.POST_STEP:
             if self._post_step_t0 is None or self._post_q_start is None:
                 self._post_step_t0 = self.get_clock().now()
@@ -739,8 +739,11 @@ class StateNode(Node):
                 t = (self.get_clock().now() - self._post_step_t0).nanoseconds * 1e-9
                 tau = max(0.0, min(t / post_T, 1.0))
 
-                # smoothstep S-curve in position: s = 3t^2 - 2t^3
+                # smoothstep position profile: s = 3t^2 - 2t^3
                 s = (3.0 * tau * tau) - (2.0 * tau * tau * tau)
+
+                # derivative for velocity shaping: ds/dt = (6t - 6t^2)/T
+                ds_dt = (6.0 * tau - 6.0 * tau * tau) / post_T
 
                 q_start = self._post_q_start
                 delta = np.zeros(4, dtype=float)
@@ -748,9 +751,15 @@ class StateNode(Node):
 
                 q_cmd = q_start + s * delta
                 qdot = np.zeros(4, dtype=float)
+                qdot[2] = ds_dt * delta[2]
 
-                self._publish_targets(q_cmd, qdot, use_velocity=False)
-                self.q = q_cmd
+                # optional safety clamp (pakai limit yg sudah ada)
+                qdot = np.clip(qdot, -self.qdot_lim, self.qdot_lim)
+
+                self._publish_targets(q_cmd, qdot, use_velocity=True)
+
+                # keep internal q consistent
+                self.q = np.clip(q_cmd, self.q_min, self.q_max)
 
                 if tau >= 1.0:
                     self._post_step_done = True
@@ -761,9 +770,13 @@ class StateNode(Node):
                 self._set_swirl_active(False)
                 return
 
-            # sudah selesai, tahan posisi
+            # done: hold (zero vel)
+            qdot = np.zeros(4, dtype=float)
+            self._publish_targets(self.q, qdot, use_velocity=True)
+            self._set_arm_at(True)
             self._set_swirl_active(False)
             return
+
 
         # HOME
         if self.arm_phase == ArmPhase.HOME:
