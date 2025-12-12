@@ -32,7 +32,7 @@ soes_state:
     # ==========================
     rate_hz: 100.0
     pos_tol_m: 0.005
-    settle_s: 0.5
+    settle_s: 0.01
 
     link_lengths_m: [0.00, 0.17, 0.14, 0.04]
 
