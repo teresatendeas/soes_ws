@@ -36,7 +36,7 @@ soes_state:
 
     link_lengths_m: [0.00, 0.17, 0.14, 0.04]
 
-    kp_cart: 1.0
+    kp_cart: 0.5
     damping_lambda: 0.1
     qdot_limit_rad_s: [1.5, 1.5, 1.5, 1.5]
 
