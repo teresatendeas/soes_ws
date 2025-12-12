@@ -29,10 +29,12 @@ class Phase(enum.Enum):
 
 # ---------------- Arm phases (internal IK) ----------------
 class ArmPhase(enum.Enum):
-    HOME  = 0
-    WAIT  = 1
-    MOVE  = 2
-    SWIRL = 3
+    HOME     = 0   # go to q_home
+    WAIT     = 1   # idle until commanded
+    MOVE     = 2   # move toward target center
+    SWIRL    = 3   # swirl trajectory
+    RETRACT  = 4   # move away after swirl (to home)
+    HOLD     = 5   # stay still (publish hold)
 
 
 class StateNode(Node):
@@ -92,6 +94,9 @@ class StateNode(Node):
         self.theta_max = 2.0 * math.pi * self.turns
         self.s         = (self.height / self.theta_max) if self.theta_max != 0.0 else 0.0
 
+        # ========== Home pose (INIT_POS) ==========
+        self.q_home = np.array([0.0, math.radians(90.0), math.radians(-90.0), 0.0], dtype=float)
+
         # ==================   ROS I/O   ======================
         qos = QoSProfile(
             depth=10,
@@ -102,7 +107,12 @@ class StateNode(Node):
         self.pump_pub    = self.create_publisher(PumpCmd, '/pump/cmd', 1)
         self.roller_pub  = self.create_publisher(RollerCmd, '/roller/cmd', 1)
         self.arm_pub     = self.create_publisher(JointTargets, '/arm/joint_targets', 10)
-        
+
+        # MISSING pubs in your snippet (needed by your own functions)
+        self.phase_pub   = self.create_publisher(Int32, '/soes/phase', 10)
+        self.swirl_pub   = self.create_publisher(Bool, '/arm/swirl_active', 10)
+        self.arm_at_pub  = self.create_publisher(Bool, '/arm/at_target', 10)
+
         self.switch_on = True
         self.create_subscription(Bool, '/esp_switch_on', self._on_switch, 10)
 
@@ -113,7 +123,7 @@ class StateNode(Node):
         self.vision_request_pub = self.create_publisher(Bool, '/vision/request', 1)
         self.vision_done: Optional[bool] = None
         self.create_subscription(Bool, '/vision/soes_done', self._on_vision_done, 10)
-        
+
         self.create_subscription(CupcakeCenters, '/vision/centers', self._on_centers, qos)
 
         self.pump = PumpController(self._pump_on, self._pump_off)
@@ -140,8 +150,29 @@ class StateNode(Node):
 
         self.swirl_active = False
 
+        # Vision centers + step control
+        self.centers: Optional[List[Tuple[float, float, float]]] = None
+        self.step_idx = 0                # 0..2 for STEP0..STEP2
+        self.target_idx = 0              # 0..2 from order[]
+        self._home_done_logged = False
+
+        # Tick timer (your code needs this to run)
+        self.timer = self.create_timer(self.dt, self._on_timer)
+
         self.get_logger().info('soes_state: ready (IDLE, waiting RESET LOW).')
         self._publish_phase()
+
+    # ==================  TIMER ===========================
+    def _on_timer(self):
+        # keep pump controller alive if it has internal timing
+        if hasattr(self.pump, "tick"):
+            try:
+                self.pump.tick(self.dt)
+            except Exception as e:
+                self.get_logger().warn(f"PumpController.tick error: {e}")
+
+        self.tick()
+        self._arm_tick()
 
     # ==================  VISION CALLBACKS  ===============
     def _on_vision_done(self, msg: Bool):
@@ -172,6 +203,13 @@ class StateNode(Node):
             req.data = True
             self.vision_request_pub.publish(req)
             self.get_logger().info('CAMERA: sent /vision/request = True, waiting /vision/soes_done')
+
+        # Hook arm behavior to overall phase
+        if new_phase == Phase.INIT_POS:
+            self._arm_enter(ArmPhase.HOME, None)
+
+        if new_phase in (Phase.STEP0, Phase.STEP1, Phase.STEP2):
+            self._setup_step_target()
 
         self.get_logger().warn(f'[OVERALL] {old_phase.name} → {new_phase.name}')
         self.get_logger().info(f'[STATE] -> {self.phase.name}')
@@ -204,6 +242,9 @@ class StateNode(Node):
         msg.on = bool(on)
         self.roller_pub.publish(msg)
 
+    def _set_arm_at(self, at: bool):
+        self.arm_at_pub.publish(Bool(data=bool(at)))
+
     # ==================  SWITCH / PAUSE  =================
     def _on_switch(self, msg: Bool):
         prev = self.switch_on
@@ -215,6 +256,7 @@ class StateNode(Node):
             self._roller_cmd(False)
             self._set_swirl_active(False)
             self._set_arm_at(False)
+            self.step_idx = 0
             self._enter(Phase.INIT_POS)
 
         elif (not prev) and self.switch_on:
@@ -244,21 +286,39 @@ class StateNode(Node):
             return
 
         if self.phase == Phase.INIT_POS:
-            # Fill in so the position of the arms will go to [0, 90, -90, 0] degrees            
+            # Arm motion handled by _arm_tick HOME.
+            # When home reached, start next step.
+            if self.arm_phase == ArmPhase.HOLD:
+                # Decide next phase based on step_idx
+                if self.step_idx == 0:
+                    self.get_logger().info("INIT_POS -> STEP0")
+                    self._enter(Phase.STEP0)
+                elif self.step_idx == 1:
+                    self.get_logger().info("INIT_POS -> STEP1")
+                    self._enter(Phase.STEP1)
+                elif self.step_idx == 2:
+                    self.get_logger().info("INIT_POS -> STEP2")
+                    self._enter(Phase.STEP2)
+                else:
+                    self.get_logger().info("All steps done -> CAMERA")
+                    self._enter(Phase.CAMERA)
 
         elif self.phase == Phase.STEP0:
             if self._run_step():
-                self.get_logger().info("STEP0 → STEP1")
+                self.get_logger().info("STEP0 complete -> INIT_POS")
+                self.step_idx = 1
                 self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.STEP1:
             if self._run_step():
-                self.get_logger().info("STEP1 → STEP2")
+                self.get_logger().info("STEP1 complete -> INIT_POS")
+                self.step_idx = 2
                 self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.STEP2:
             if self._run_step():
                 self.get_logger().info("STEP2 done -> INIT_POS before CAMERA")
+                self.step_idx = 3
                 self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.CAMERA:
@@ -291,9 +351,14 @@ class StateNode(Node):
                 self._roller_cmd(False)
                 self._roller_active = False
                 self.get_logger().info('ROLLER OFF, restart.')
+                # restart cycle
+                self.step_idx = 0
                 self._enter(Phase.INIT_POS)
 
-        elif self.phase == Phase.IDLE: # The robot arm should NOT move here
+        elif self.phase == Phase.IDLE:
+            # The robot arm should NOT move here
+            # Ensure it holds still
+            self._hold_position()
             return
 
     # ==================  STEP LOGIC  =====================
@@ -305,6 +370,7 @@ class StateNode(Node):
         )
 
     def _run_step(self) -> bool:
+        # Step ends when swirl finished (pump was running only during swirl_active)
         if self.swirl_active:
             if not self._did_start_pump:
                 self.pump.start(duty=1.0, duration_s=0.0)
@@ -385,6 +451,32 @@ class StateNode(Node):
         msg.use_velocity = bool(use_velocity)
         self.arm_pub.publish(msg)
 
+    def _hold_position(self):
+        qdot0 = np.zeros(4, dtype=float)
+        self._publish_targets(self.q, qdot0, use_velocity=False)
+
+    def _home_step(self, speed_scale: float = 1.0) -> bool:
+        # Joint-space approach to q_home (stable and minimal dependencies)
+        err = self.q_home - self.q
+        if np.linalg.norm(err) < 1e-6:
+            self._hold_position()
+            return True
+
+        # simple P in joint space
+        k = 3.0
+        qdot = k * err
+        limit = self.qdot_lim * speed_scale
+        qdot = np.clip(qdot, -limit, limit)
+
+        self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
+        self._last_qdot_cmd = qdot.copy()
+        self._publish_targets(self.q, qdot, use_velocity=True)
+
+        close = np.max(np.abs(self.q_home - self.q)) < math.radians(1.0)
+        if close:
+            self._hold_position()
+        return close
+
     def _ik_step(
         self,
         des_xyz: np.ndarray,
@@ -424,19 +516,91 @@ class StateNode(Node):
         self._set_arm_at(at)
         return at
 
+    def _setup_step_target(self):
+        # Choose target based on order list
+        if not self.order:
+            self.get_logger().warn("[ROBOHAND] order empty, cannot run step")
+            return
+
+        if self.step_idx > 2:
+            return
+
+        # map step_idx -> order index safely
+        oi = min(self.step_idx, len(self.order) - 1)
+        self.target_idx = int(self.order[oi])
+        self.target_idx = 0 if self.target_idx < 0 else 2 if self.target_idx > 2 else self.target_idx
+
+        if self.centers is None or len(self.centers) < 3:
+            self.get_logger().warn("[ROBOHAND] centers not ready, staying WAIT")
+            self._arm_enter(ArmPhase.WAIT, None)
+            return
+
+        self.spiral_center = np.array(self.centers[self.target_idx], dtype=float)
+        self.spiral_theta = 0.0
+
+        label = f"pos{self.target_idx + 1}"
+        self.get_logger().info(f"[ROBOHAND] STEP{self.step_idx}: target={label}, center={self.spiral_center}")
+
+        # Start by moving to center (MOVE). Swirl starts after at-target.
+        self._arm_enter(ArmPhase.MOVE, self.spiral_center.copy())
+
     def _start_swirl(self):
-        if self.centers is None or self.target_idx not in (0, 1, 2):
+        if self.spiral_center is None:
             return
 
         label = f"pos{self.target_idx + 1}"
         self.get_logger().info(f"[ROBOHAND] Arrived at {label}, starting swirl")
-
-        self.spiral_center = np.array(self.centers[self.target_idx], dtype=float)
         self.spiral_theta = 0.0
         self._arm_enter(ArmPhase.SWIRL, self.spiral_center.copy())
 
-    def _arm_tick(self): # I want 4 phases: Move towards swirl, Making swirl, Move away, staying still
+    def _go_home(self):
+        self._arm_enter(ArmPhase.RETRACT, None)
+
+    def _arm_tick(self):
+        # I want 4 phases: Move towards swirl, Making swirl, Move away, staying still
         if self.paused:
+            return
+
+        # In IDLE, do not move
+        if self.phase == Phase.IDLE:
+            self._set_swirl_active(False)
+            self._set_arm_at(False)
+            self._hold_position()
+            self.arm_phase = ArmPhase.HOLD
+            return
+
+        # HOME: go to q_home and then HOLD
+        if self.arm_phase == ArmPhase.HOME:
+            at = self._home_step(speed_scale=0.6)
+            if at:
+                if not self._home_done_logged:
+                    self.get_logger().info("[ROBOHAND] Arrived at INIT_POS (q_home). HOLD")
+                    self._home_done_logged = True
+                self._set_swirl_active(False)
+                self._set_arm_at(True)
+                self.arm_phase = ArmPhase.HOLD
+                self._hold_position()
+            return
+
+        # HOLD: keep still
+        if self.arm_phase == ArmPhase.HOLD:
+            self._set_swirl_active(False)
+            self._hold_position()
+            return
+
+        # WAIT: centers not ready or not commanded
+        if self.arm_phase == ArmPhase.WAIT:
+            self._set_swirl_active(False)
+            self._set_arm_at(False)
+            self._hold_position()
+            return
+
+        # MOVE: go to center, then SWIRL
+        if self.arm_phase == ArmPhase.MOVE and self.des_xyz is not None:
+            at = self._ik_step(self.des_xyz, xdot_ff=None, speed_scale=0.9)
+            self._set_swirl_active(False)
+            if at:
+                self._start_swirl()
             return
 
         # SWIRL
@@ -470,8 +634,22 @@ class StateNode(Node):
                 self._set_swirl_active(True)
             return
 
+        # RETRACT: go back to home, then HOLD
+        if self.arm_phase == ArmPhase.RETRACT:
+            at = self._home_step(speed_scale=0.8)
+            self._set_swirl_active(False)
+            if at:
+                self.get_logger().info("[ROBOHAND] Retract done. HOLD")
+                self._set_arm_at(True)
+                self.arm_phase = ArmPhase.HOLD
+                self._hold_position()
+            return
+
+        # fallback
         self._set_arm_at(False)
         self._set_swirl_active(False)
+        self._hold_position()
+
 
 def main():
     rclpy.init()
