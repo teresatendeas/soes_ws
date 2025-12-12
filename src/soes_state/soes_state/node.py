@@ -29,7 +29,7 @@ class Phase(enum.Enum):
 
 # ---------------- Arm phases (internal IK) ----------------
 class ArmPhase(enum.Enum):
-    HOME  = 0    # joint-space home (index = -1)
+    HOME  = 0    # go to home (index = -1 or 4)
     WAIT  = 1    # idle / hold (index = 3)
     MOVE  = 2    # go to center i (Cartesian target)
     SWIRL = 3    # generate spiral about center i
@@ -50,7 +50,6 @@ class StateNode(Node):
         self.declare_parameter('roller_distance_mm', 70.0)
         self.declare_parameter('roller_speed_mm_s', 17.5)
 
-        # camera timeout
         self.declare_parameter('camera_timeout_s', 50.0)
 
         self.t_settle   = float(self.get_parameter('settle_before_pump_s').value)
@@ -133,7 +132,6 @@ class StateNode(Node):
 
         self.move_T = float(self.get_parameter('move_profile_time_s').value)
         self.home_T = float(self.get_parameter('home_profile_time_s').value)
-
         self.brake_T = float(self.get_parameter('brake_time_s').value)
 
         # =====================================================
@@ -145,7 +143,6 @@ class StateNode(Node):
             history=HistoryPolicy.KEEP_LAST,
         )
 
-        # State / roller / pump / vision quality
         self.index_pub   = self.create_publisher(Int32, '/state/active_index', 1)
         self.pump_pub    = self.create_publisher(PumpCmd, '/pump/cmd', 1)
         self.roller_pub  = self.create_publisher(RollerCmd, '/roller/cmd', 1)
@@ -153,23 +150,19 @@ class StateNode(Node):
             VisionQuality, '/vision/quality', self.on_quality, qos
         )
 
-        # Arm command and feedback topics
         self.arm_pub     = self.create_publisher(JointTargets, '/arm/joint_targets', 10)
         self.arm_at_pub  = self.create_publisher(Bool, '/arm/at_target', 1)
         self.swirl_pub   = self.create_publisher(Bool, '/arm/swirl_active', 1)
 
-        # publish state phase
         self.phase_pub = self.create_publisher(Int32, '/state/phase', 1)
 
-        # switch / pause
-        self.switch_on = True   # HIGH at startup
+        self.switch_on = True
         self.create_subscription(Bool, '/esp_switch_on', self._on_switch, 10)
 
         self.paused = False
         self.pause_start = None
         self.create_subscription(Bool, '/esp_paused', self._on_paused, 10)
 
-        # Vision
         self.vision_request_pub = self.create_publisher(Bool, '/vision/request', 1)
         self.vision_done: Optional[bool] = None
         self.create_subscription(Bool, '/vision/soes_done', self._on_vision_done, 10)
@@ -177,61 +170,56 @@ class StateNode(Node):
             CupcakeCenters, '/vision/centers', self._on_centers, qos
         )
 
-        # Pump helper
         self.pump = PumpController(self._pump_on, self._pump_off)
 
         # =====================================================
         # ===================   RUNTIME   =====================
         # =====================================================
-        # High-level state
         self.phase = Phase.IDLE
         self.phase_t0 = self.get_clock().now()
         self.quality_flag = False
         self._step_idx = 0
         self._did_start_pump = False
 
-        # Roller state
         self._roller_active = False
         self._roller_duration_s = 0.0
 
-        # Arm / IK runtime
         self.q: np.ndarray = np.zeros(4, dtype=float)
 
-        # --------- CHANGE #1: startup HOLD ---------
+        # startup HOLD
         self.active_index: int = 3
         self.centers: Optional[List[Tuple[float, float, float]]] = None
 
-        # --------- CHANGE #2: startup WAIT (no motion) ---------
         self.arm_phase = ArmPhase.WAIT
         self.arm_phase_t0 = self.get_clock().now()
         self.last_within_tol = None
         self.des_xyz: Optional[np.ndarray] = None
 
-        # Spiral bookkeeping
         self.spiral_theta = 0.0
         self.spiral_center: Optional[np.ndarray] = None
 
-        # Arrival logging
         self._home_done_logged = False
 
-        # Arm at-target + swirl flags (now internal)
         self.arm_at = False
         self.arm_at_since = None
         self.swirl_active = False
 
-        # Braking state (soft stop)
         self._braking = False
         self._brake_t0 = None
         self._brake_qdot0 = np.zeros(4, dtype=float)
 
-        # NEW: only go HOME after SWIRL completes
+        # NEW: home request flag
         self._home_requested = False
 
-        # Timers
-        self.timer_state = self.create_timer(0.05, self.tick)          # 20 Hz high-level
-        self.timer_arm   = self.create_timer(self.dt, self._arm_tick)  # IK loop
+        # NEW: home mode
+        # 0 = wrap yaw to shortest path (used for index -1)
+        # 1 = raw (no wrap) follow q_home_rad direction (used for index 4)
+        self._home_mode = 0
 
-        # --------- CHANGE #3: publish HOLD once at startup ---------
+        self.timer_state = self.create_timer(0.05, self.tick)
+        self.timer_arm   = self.create_timer(self.dt, self._arm_tick)
+
+        # publish HOLD at startup
         self._publish_index(3)
 
         self.get_logger().info('soes_state: ready (IDLE, waiting RESET LOW).')
@@ -323,6 +311,7 @@ class StateNode(Node):
         prev = self.switch_on
         self.switch_on = bool(msg.data)
 
+        # HIGH -> LOW : start sequence
         if prev and not self.switch_on:
             self.get_logger().warn('RESET pressed (HIGH -> LOW) -> INIT_POS.')
             self.pump.stop()
@@ -331,10 +320,12 @@ class StateNode(Node):
             self._set_arm_at(False)
             self._step_idx = 0
 
+            # INIT_POS uses active_index=4 (home but raw direction)
             self._home_requested = True
-            self._publish_index(-1)
+            self._publish_index(4)
             self._enter(Phase.INIT_POS)
 
+        # LOW -> HIGH : go IDLE hold
         elif (not prev) and self.switch_on:
             self.get_logger().warn('RESET released (LOW -> HIGH) -> IDLE.')
             self.pump.stop()
@@ -372,6 +363,7 @@ class StateNode(Node):
             self._test_motor_tick()
             return
 
+        # INIT_POS: wait HOME settle. if no home request, HOLD (3)
         if self.phase == Phase.INIT_POS:
             if not self._home_requested:
                 if self.active_index != 3:
@@ -457,7 +449,8 @@ class StateNode(Node):
 
                 self._step_idx = 0
                 self._home_requested = True
-                self._publish_index(-1)
+                # next cycle INIT_POS uses index 4
+                self._publish_index(4)
                 self._enter(Phase.INIT_POS)
 
         elif self.phase == Phase.IDLE:
@@ -552,7 +545,6 @@ class StateNode(Node):
         else:
             self.arm_at = False
             self.arm_at_since = None
-
         self.arm_at_pub.publish(Bool(data=self.arm_at))
 
     def _set_swirl_active(self, active: bool):
@@ -560,12 +552,24 @@ class StateNode(Node):
         self.swirl_pub.publish(Bool(data=self.swirl_active))
 
     def _align_arm_phase_with_index(self):
+        # -1 -> HOME (shortest yaw wrap)
         if self.active_index == -1:
-            self.get_logger().info("[ROBOHAND] Moving to init pos (HOME)")
+            self._home_mode = 0
+            self.get_logger().info("[ROBOHAND] HOME (active_index=-1)")
             self._arm_enter(ArmPhase.HOME, None)
+
+        # 4 -> INIT_POS HOME (raw, follow q_home_rad direction)
+        elif self.active_index == 4:
+            self._home_mode = 1
+            self.get_logger().info("[ROBOHAND] INIT_POS HOME (active_index=4)")
+            self._arm_enter(ArmPhase.HOME, None)
+
+        # 3 -> HOLD
         elif self.active_index == 3:
             self.get_logger().info("[ROBOHAND] HOLD (active_index=3)")
             self._arm_enter(ArmPhase.WAIT, None)
+
+        # 0/1/2 -> MOVE
         elif self.active_index in (0, 1, 2) and self.centers and len(self.centers) >= 3:
             label = f"pos{self.active_index + 1}"
             self.get_logger().info(f"[ROBOHAND] Moving to {label}")
@@ -575,7 +579,6 @@ class StateNode(Node):
 
     def _arm_enter(self, new_phase: ArmPhase, xyz: Optional[np.ndarray]):
         old_phase = self.arm_phase
-
         self.arm_phase = new_phase
         self.arm_phase_t0 = self.get_clock().now()
         self.last_within_tol = None
@@ -589,14 +592,7 @@ class StateNode(Node):
             self._home_done_logged = False
 
         if new_phase != old_phase:
-            if self.des_xyz is not None:
-                self.get_logger().info(
-                    f"[ROBOHAND] Phase {old_phase.name} -> {new_phase.name}, des={self.des_xyz}"
-                )
-            else:
-                self.get_logger().info(
-                    f"[ROBOHAND] Phase {old_phase.name} -> {new_phase.name}"
-                )
+            self.get_logger().info(f"[ROBOHAND] Phase {old_phase.name} -> {new_phase.name}")
 
     def _arm_elapsed(self) -> float:
         return (self.get_clock().now() - self.arm_phase_t0).nanoseconds * 1e-9
@@ -609,33 +605,6 @@ class StateNode(Node):
         scale = 4.0 * tau * (1.0 - tau)
         return max(scale, 0.1)
 
-    def fk_xyz(self, q: np.ndarray) -> np.ndarray:
-        q1, q2, q3, q4 = q
-        L1, L2, L3, L4 = self.L1, self.L2, self.L3, self.L4
-        r_fk = L2*math.cos(q2) + L3*math.cos(q2+q3) + L4*math.cos(q2+q3+q4)
-        z_fk = L1 + L2*math.sin(q2) + L3*math.sin(q2+q3) + L4*math.sin(q2+q3+q4)
-        x_fk = r_fk * math.cos(q1)
-        y_fk = r_fk * math.sin(q1)
-        return np.array([x_fk, y_fk, z_fk], dtype=float)
-
-    def jacobian(self, q: np.ndarray) -> np.ndarray:
-        q1, q2, q3, q4 = q
-        L2, L3, L4 = self.L2, self.L3, self.L4
-        r_fk   = L2*math.cos(q2) + L3*math.cos(q2+q3) + L4*math.cos(q2+q3+q4)
-        dr_dq2 = -L2*math.sin(q2) - L3*math.sin(q2+q3) - L4*math.sin(q2+q3+q4)
-        dr_dq3 = -L3*math.sin(q2+q3) - L4*math.sin(q2+q3+q4)
-        dr_dq4 = -L4*math.sin(q2+q3+q4)
-        dz_dq2 =  L2*math.cos(q2) + L3*math.cos(q2+q3) + L4*math.cos(q2+q3+q4)
-        dz_dq3 =  L3*math.cos(q2+q3) + L4*math.cos(q2+q3+q4)
-        dz_dq4 =  L4*math.cos(q2+q3+q4)
-
-        J = np.zeros((3, 4))
-        J[:, 0] = [-r_fk*math.sin(q1), r_fk*math.cos(q1), 0.0]
-        J[:, 1] = [math.cos(q1)*dr_dq2, math.sin(q1)*dr_dq2, dz_dq2]
-        J[:, 2] = [math.cos(q1)*dr_dq3, math.sin(q1)*dr_dq3, dz_dq3]
-        J[:, 3] = [math.cos(q1)*dr_dq4, math.sin(q1)*dr_dq4, dz_dq4]
-        return J
-
     def _publish_targets(self, q: np.ndarray, qdot: np.ndarray, use_velocity: bool):
         msg = JointTargets()
         msg.position = [float(a) for a in q]
@@ -643,11 +612,22 @@ class StateNode(Node):
         msg.use_velocity = bool(use_velocity)
         self.arm_pub.publish(msg)
 
+    def _wrap_pi(self, a: float) -> float:
+        return (a + math.pi) % (2.0 * math.pi) - math.pi
+
     # ---------------------------
     # Joint-space HOMING (SAFE)
     # ---------------------------
     def _home_step(self, speed_scale: float = 1.0) -> bool:
         err = self.q_home - self.q
+
+        # MODE 0: shortest yaw direction (wrap only joint0)
+        if self._home_mode == 0:
+            err0 = self._wrap_pi(float(self.q_home[0] - self.q[0]))
+            err[0] = err0
+
+        # MODE 1: raw direction (no wrap), follows q_home_rad as-is
+
         if np.linalg.norm(err) <= self.home_tol:
             if self.last_within_tol is None:
                 self.last_within_tol = self.get_clock().now()
@@ -699,6 +679,34 @@ class StateNode(Node):
         self._set_arm_at(False)
         return False
 
+    # ---------- FK & Jacobian ----------
+    def fk_xyz(self, q: np.ndarray) -> np.ndarray:
+        q1, q2, q3, q4 = q
+        L1, L2, L3, L4 = self.L1, self.L2, self.L3, self.L4
+        r_fk = L2*math.cos(q2) + L3*math.cos(q2+q3) + L4*math.cos(q2+q3+q4)
+        z_fk = L1 + L2*math.sin(q2) + L3*math.sin(q2+q3) + L4*math.sin(q2+q3+q4)
+        x_fk = r_fk * math.cos(q1)
+        y_fk = r_fk * math.sin(q1)
+        return np.array([x_fk, y_fk, z_fk], dtype=float)
+
+    def jacobian(self, q: np.ndarray) -> np.ndarray:
+        q1, q2, q3, q4 = q
+        L2, L3, L4 = self.L2, self.L3, self.L4
+        r_fk   = L2*math.cos(q2) + L3*math.cos(q2+q3) + L4*math.cos(q2+q3+q4)
+        dr_dq2 = -L2*math.sin(q2) - L3*math.sin(q2+q3) - L4*math.sin(q2+q3+q4)
+        dr_dq3 = -L3*math.sin(q2+q3) - L4*math.sin(q2+q3+q4)
+        dr_dq4 = -L4*math.sin(q2+q3+q4)
+        dz_dq2 =  L2*math.cos(q2) + L3*math.cos(q2+q3) + L4*math.cos(q2+q3+q4)
+        dz_dq3 =  L3*math.cos(q2+q3) + L4*math.cos(q2+q3+q4)
+        dz_dq4 =  L4*math.cos(q2+q3+q4)
+
+        J = np.zeros((3, 4))
+        J[:, 0] = [-r_fk*math.sin(q1), r_fk*math.cos(q1), 0.0]
+        J[:, 1] = [math.cos(q1)*dr_dq2, math.sin(q1)*dr_dq2, dz_dq2]
+        J[:, 2] = [math.cos(q1)*dr_dq3, math.sin(q1)*dr_dq3, dz_dq3]
+        J[:, 3] = [math.cos(q1)*dr_dq4, math.sin(q1)*dr_dq4, dz_dq4]
+        return J
+
     def _ik_step(
         self,
         des_xyz: np.ndarray,
@@ -724,49 +732,22 @@ class StateNode(Node):
         limit = self.qdot_lim * speed_scale
         qdot = np.clip(qdot, -limit, limit)
 
+        self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
+        self._publish_targets(self.q, qdot, use_velocity=True)
+
         at = (
             self.last_within_tol is not None and
             (self.get_clock().now() - self.last_within_tol) >= Duration(seconds=self.settle_s)
         )
 
-        if at:
-            now = self.get_clock().now()
-
-            if not self._braking:
-                self._braking = True
-                self._brake_t0 = now
-                self._brake_qdot0 = qdot.copy()
-
-            T = max(self.brake_T, 1e-3)
-            t = (now - self._brake_t0).nanoseconds * 1e-9
-            k = max(0.0, 1.0 - (t / T))
-
-            qdot_cmd = self._brake_qdot0 * k
-
-            if k <= 0.0:
-                self._publish_targets(self.q, np.zeros(4, dtype=float), use_velocity=False)
-            else:
-                self._publish_targets(self.q, qdot_cmd, use_velocity=True)
-
-            self._set_arm_at(True)
-            return True
-
-        self._braking = False
-        self._brake_t0 = None
-
-        self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
-        self._publish_targets(self.q, qdot, use_velocity=True)
-
-        self._set_arm_at(False)
-        return False
+        self._set_arm_at(at)
+        return at
 
     def _start_swirl(self):
         if self.centers is None or self.active_index not in (0, 1, 2):
             return
-
         label = f"pos{self.active_index + 1}"
         self.get_logger().info(f"[ROBOHAND] Arrived at {label}, starting swirl")
-
         self.spiral_center = np.array(self.centers[self.active_index], dtype=float)
         self.spiral_theta = 0.0
         self._arm_enter(ArmPhase.SWIRL, self.spiral_center.copy())
@@ -774,7 +755,6 @@ class StateNode(Node):
     def _arm_tick(self):
         if self.paused:
             return
-
         if self.phase == Phase.TEST_MOTOR:
             return
 
@@ -823,6 +803,7 @@ class StateNode(Node):
                 label = f"pos{self.active_index + 1}" if self.active_index in (0, 1, 2) else "current position"
                 self.get_logger().info(f"[SWIRL] Swirl done at {label}")
 
+                # after swirl, go HOME using index -1 (shortest yaw wrap)
                 self._home_requested = True
                 self._publish_index(-1)
 
