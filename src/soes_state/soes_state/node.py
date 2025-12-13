@@ -231,7 +231,7 @@ class StateNode(Node):
         # Stability gate (anti-cetek)
         self._stable_count = 0
 
-        # NEW: HOME hold latch (prevents re-sending tiny velocities when active_index=-1 repeats)
+        # HOME hold latch
         self._home_hold = False
 
         # Timers
@@ -270,12 +270,10 @@ class StateNode(Node):
         self.phase_t0 = self.get_clock().now()
         self._did_start_pump = False
 
-        # reset roller state jika bukan ROLL_TRAY
         if new_phase != Phase.ROLL_TRAY:
             self._roller_active = False
             self._roller_duration_s = 0.0
 
-        # Vision request jika CAMERA
         if new_phase == Phase.CAMERA:
             self.vision_done = None
             req = Bool()
@@ -283,7 +281,6 @@ class StateNode(Node):
             self.vision_request_pub.publish(req)
             self.get_logger().info('CAMERA: sent /vision/request = True, waiting /vision/soes_done')
 
-        # Log overall
         self.get_logger().warn(f'[OVERALL] {old_phase.name} → {new_phase.name}')
         self.get_logger().info(f'[STATE] -> {self.phase.name}')
         self._publish_phase()
@@ -294,7 +291,6 @@ class StateNode(Node):
     def _publish_index(self, idx: int):
         idx = int(idx)
 
-        # NEW: leaving HOME (-1) clears home-hold latch
         if idx != -1:
             self._home_hold = False
 
@@ -333,18 +329,9 @@ class StateNode(Node):
     # ==================  SWITCH / PAUSE  =================
     # =====================================================
     def _on_switch(self, msg: Bool):
-        """
-        /esp_switch_on:
-        - True  = HIGH (tombol tidak ditekan)
-        - False = LOW  (tombol ditekan)
-
-        LOW (tekan)  -> mulai dari INIT_POS
-        HIGH awal    -> tetap IDLE
-        """
         prev = self.switch_on
         self.switch_on = bool(msg.data)
 
-        # HIGH -> LOW : tombol ditekan -> RESET & mulai sequence
         if prev and not self.switch_on:
             self.get_logger().warn('RESET pressed (HIGH -> LOW) -> INIT_POS.')
             self.pump.stop()
@@ -353,11 +340,9 @@ class StateNode(Node):
             self._set_arm_at(False)
             self._step_idx = 0
 
-            # HOME
             self._publish_index(-1)
             self._enter(Phase.INIT_POS)
 
-        # LOW -> HIGH : tombol dilepas -> kembali ke IDLE
         elif (not prev) and self.switch_on:
             self.get_logger().warn('RESET released (LOW -> HIGH) -> IDLE.')
             self.pump.stop()
@@ -374,7 +359,6 @@ class StateNode(Node):
         elif not new_state and self.paused:
             if self.pause_start is not None:
                 dt = self.get_clock().now() - self.pause_start
-                # shift both high-level and arm timers
                 self.phase_t0 = self.phase_t0 + dt
                 self.arm_phase_t0 = self.arm_phase_t0 + dt
                 self.pause_start = None
@@ -395,7 +379,6 @@ class StateNode(Node):
             self._test_motor_tick()
             return
 
-        # INIT_POS: tunggu sampai arm HOME + settle
         if self.phase == Phase.INIT_POS:
             if self.arm_at and self.arm_at_since is not None:
                 if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
@@ -435,16 +418,12 @@ class StateNode(Node):
                 self._publish_index(-1)
                 self._enter(Phase.INIT_POS)
 
-        # POST_STEP: cukup tunggu HOME settle lalu masuk CAMERA
         elif self.phase == Phase.POST_STEP:
             if self.arm_at and self.arm_at_since is not None:
                 if (self.get_clock().now() - self.arm_at_since) >= Duration(seconds=self.t_settle):
                     self._enter(Phase.CAMERA)
 
-        # CAMERA: tunggu vision_done atau timeout
         elif self.phase == Phase.CAMERA:
-
-            # 1. Ada hasil
             if self.vision_done is not None:
                 self.get_logger().info("Vision is done")
                 if self.vision_done:
@@ -454,13 +433,11 @@ class StateNode(Node):
                 self._enter(Phase.ROLL_TRAY)
                 return
 
-            # 2. Timeout
             if self._elapsed() >= self.cam_to:
                 self.get_logger().warn("Camera timeout → ROLL_TRAY")
                 self._enter(Phase.ROLL_TRAY)
                 return
 
-        # ROLL_TRAY
         elif self.phase == Phase.ROLL_TRAY:
             roll_time = self.roll_dist / max(self.roll_speed, 1e-3)
             t = self._elapsed()
@@ -497,10 +474,6 @@ class StateNode(Node):
         )
 
     def _run_step(self) -> bool:
-        """
-        True  -> step selesai (swirl berhenti, pump dimatikan)
-        False -> masih swirl / masih jalan
-        """
         if self.swirl_active:
             if not self._did_start_pump:
                 self.pump.start(duty=1.0, duration_s=0.0)
@@ -566,7 +539,6 @@ class StateNode(Node):
             pump_msg.duty = 1.0
             pump_msg.duration_s = 0.0
 
-        # Saat TEST_MOTOR, IK loop di-_arm_tick akan dilewati (lihat _arm_tick)
         self.pump_pub.publish(pump_msg)
         self.arm_pub.publish(jt)
 
@@ -589,10 +561,8 @@ class StateNode(Node):
         self.swirl_pub.publish(Bool(data=self.swirl_active))
 
     def _align_arm_phase_with_index(self):
-        # active_index == -1 -> HOME or HOLD (latched)
         if self.active_index == -1:
             if self._home_hold and self.arm_phase == ArmPhase.WAIT:
-                # keep holding, do not re-run HOME IK
                 self._publish_targets(self.q, np.zeros(4, dtype=float), use_velocity=True)
                 self._set_arm_at(True)
                 self._set_swirl_active(False)
@@ -602,7 +572,6 @@ class StateNode(Node):
             self._arm_enter(ArmPhase.HOME, None)
             return
 
-        # 0/1/2 -> MOVE ke salah satu cupcake center
         if self.active_index in (0, 1, 2) and self.centers and len(self.centers) >= 3:
             label = f"pos{self.active_index + 1}"
             self.get_logger().info(f"[ROBOHAND] Moving to {label}")
@@ -619,15 +588,12 @@ class StateNode(Node):
         self.last_within_tol = None
         self.des_xyz = xyz.copy() if xyz is not None else None
 
-        # reset braking whenever phase changes
         self._braking = False
         self._brake_t0 = None
         self._brake_qdot0 = np.zeros(4, dtype=float)
 
-        # reset stability gate
         self._stable_count = 0
 
-        # reset HOME arrival log
         if new_phase == ArmPhase.HOME:
             self._home_done_logged = False
 
@@ -645,9 +611,6 @@ class StateNode(Node):
         return (self.get_clock().now() - self.arm_phase_t0).nanoseconds * 1e-9
 
     def _s_curve_speed(self, profile_T: float) -> float:
-        """
-        Smooth S-curve-like speed factor in [0.1, 1].
-        """
         if profile_T <= 0.0:
             return 1.0
         t = self._arm_elapsed()
@@ -691,7 +654,6 @@ class StateNode(Node):
         self.arm_pub.publish(msg)
 
     def _home_step(self, speed_scale: float = 1.0) -> bool:
-        """Home motion di task space pakai IK yang sama."""
         des_xyz_home = self.fk_xyz(self.q_home)
         at = self._ik_step(des_xyz_home, xdot_ff=None, speed_scale=speed_scale)
 
@@ -701,85 +663,63 @@ class StateNode(Node):
 
         return at
 
-def _ik_step(
-    self,
-    des_xyz: np.ndarray,
-    xdot_ff: Optional[np.ndarray] = None,
-    speed_scale: float = 1.0
-) -> bool:
+    def _ik_step(
+        self,
+        des_xyz: np.ndarray,
+        xdot_ff: Optional[np.ndarray] = None,
+        speed_scale: float = 1.0
+    ) -> bool:
+        cur_xyz = self.fk_xyz(self.q)
+        err = des_xyz - cur_xyz
+        err_norm = float(np.linalg.norm(err))
 
-    cur_xyz = self.fk_xyz(self.q)
-    err = des_xyz - cur_xyz
-    err_norm = float(np.linalg.norm(err))
+        v = self.kp * err
+        if xdot_ff is not None:
+            v = v + xdot_ff
 
-    v = self.kp * err
-    if xdot_ff is not None:
-        v = v + xdot_ff
+        J = self.jacobian(self.q)
+        JJt = J @ J.T
+        qdot = J.T @ np.linalg.solve(JJt + (self.lmbda**2) * np.eye(3), v)
 
-    J = self.jacobian(self.q)
-    JJt = J @ J.T
-    qdot = J.T @ np.linalg.solve(
-        JJt + (self.lmbda**2) * np.eye(3),
-        v
-    )
+        limit = self.qdot_lim * speed_scale
+        qdot = np.clip(qdot, -limit, limit)
 
-    # speed limit
-    limit = self.qdot_lim * speed_scale
-    qdot = np.clip(qdot, -limit, limit)
+        vel_norm = float(np.max(np.abs(qdot)))
 
-    vel_norm = float(np.max(np.abs(qdot)))
+        pos_ok = err_norm <= self.pos_tol
+        vel_ok = vel_norm <= self.vel_eps
 
-    # ==============================
-    # ANTI-CETEK STABILITY GATE
-    # ==============================
-    pos_ok = err_norm <= self.pos_tol
-    vel_ok = vel_norm <= self.vel_eps
+        # ============================================================
+        # NEW: hard-zero small velocity when already inside pos_tol
+        # This prevents accumulating offset from integrating tiny qdot.
+        # ============================================================
+        if pos_ok and vel_ok:
+            self._stable_count += 1
 
-    if pos_ok and vel_ok:
-        self._stable_count += 1
-    else:
-        self._stable_count = 0
+            qdot[:] = 0.0
+            self._publish_targets(self.q, qdot, use_velocity=True)
 
-    at = self._stable_count >= max(1, self.stable_cycles)
+            if self._stable_count >= max(1, self.stable_cycles):
+                self._braking = False
+                self._brake_t0 = None
+                self._set_arm_at(True)
+                return True
 
-    # ==============================
-    # HARD STOP WHEN STABLE
-    # ==============================
-    if at:
-        # DO NOT integrate anymore
-        qdot[:] = 0.0
+            self._set_arm_at(False)
+            return False
+        else:
+            self._stable_count = 0
+            self._braking = False
+            self._brake_t0 = None
 
-        # publish HOLD in velocity mode
-        self._publish_targets(
-            self.q,
-            qdot,
-            use_velocity=True
-        )
+        # -------- Normal IK (not stable yet) --------
+        self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
+        self._publish_targets(self.q, qdot, use_velocity=True)
 
-        self._set_arm_at(True)
-        return True
-
-    # ==============================
-    # NORMAL IK STEP
-    # ==============================
-    self.q = np.clip(
-        self.q + qdot * self.dt,
-        self.q_min,
-        self.q_max
-    )
-
-    self._publish_targets(
-        self.q,
-        qdot,
-        use_velocity=True
-    )
-
-    self._set_arm_at(False)
-    return False
-
+        self._set_arm_at(False)
+        return False
 
     def _start_swirl(self):
-        # siapkan spiral di sekitar center aktif
         if self.centers is None or self.active_index not in (0, 1, 2):
             return
 
@@ -794,16 +734,13 @@ def _ik_step(
         if self.paused:
             return
 
-        # Saat TEST_MOTOR, jangan kirim IK
         if self.phase == Phase.TEST_MOTOR:
             return
 
-        # HOME
         if self.arm_phase == ArmPhase.HOME:
             speed_scale = self._s_curve_speed(self.home_T)
             done = self._home_step(speed_scale=speed_scale)
 
-            # NEW: latch HOLD when HOME is reached, stop re-sending tiny velocities later
             if done:
                 self._home_hold = True
                 self._publish_targets(self.q, np.zeros(4, dtype=float), use_velocity=True)
@@ -815,9 +752,7 @@ def _ik_step(
             self._set_swirl_active(False)
             return
 
-        # WAIT
         if self.arm_phase == ArmPhase.WAIT:
-            # if holding HOME, keep sending 0 vel (optional but makes ESP steady)
             if self.active_index == -1 and self._home_hold:
                 self._publish_targets(self.q, np.zeros(4, dtype=float), use_velocity=True)
                 self._set_arm_at(True)
@@ -827,7 +762,6 @@ def _ik_step(
             self._set_swirl_active(False)
             return
 
-        # MOVE
         if self.arm_phase == ArmPhase.MOVE and self.des_xyz is not None:
             speed_scale = self._s_curve_speed(self.move_T)
             at = self._ik_step(self.des_xyz, speed_scale=speed_scale)
@@ -836,21 +770,18 @@ def _ik_step(
             self._set_swirl_active(False)
             return
 
-        # SWIRL
         if self.arm_phase == ArmPhase.SWIRL and self.spiral_center is not None:
             if self.theta_max <= 0.0:
                 self._arm_enter(ArmPhase.WAIT, None)
                 self._set_swirl_active(False)
                 return
 
-            # Spiral pose
             r = self.R0 * (1.0 + self.alpha * self.spiral_theta)
             dx = r * math.cos(self.spiral_theta)
             dy = r * math.sin(self.spiral_theta)
             dz = self.s * self.spiral_theta
             des = self.spiral_center + np.array([dx, dy, dz])
 
-            # Spiral feedforward
             rdot = self.R0 * self.alpha * self.omega
             xdot = rdot * math.cos(self.spiral_theta) - r * self.omega * math.sin(self.spiral_theta)
             ydot = rdot * math.sin(self.spiral_theta) + r * self.omega * math.cos(self.spiral_theta)
@@ -870,7 +801,6 @@ def _ik_step(
                 self._set_swirl_active(True)
             return
 
-        # default
         self._set_arm_at(False)
         self._set_swirl_active(False)
 
