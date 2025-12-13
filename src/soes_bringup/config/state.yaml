@@ -55,3 +55,10 @@ soes_state:
 
     move_profile_time_s: 1.0   # smoother move to cupcake
     home_profile_time_s: 1.0   # smoother move back home
+
+    # ==========================
+    # --- BRAKE / ANTI-CETEK ----
+    # ==========================
+    brake_time_s: 0.35          # durasi ramp down
+    vel_eps_rad_s: 0.05         # batas max |qdot| supaya dianggap sudah tenang
+    stable_cycles: 5            # 5 cycle @20Hz = 0.25 s stabil sebelum dianggap "arrived"
