@@ -707,8 +707,12 @@ class StateNode(Node):
         # BRAKE BEFORE SWITCH (use_vel=1 -> ramp to 0 -> then use_vel=0)
         # ============================================================
         # Trigger braking when getting close to target, not only when "at"
-        brake_trigger_dist = max(self.pos_tol * 3.0, 1e-6)  # minimal change: fixed factor
-        need_brake = (not at) and (err_norm <= brake_trigger_dist)
+
+        brake_trigger_dist = max(self.pos_tol * 3.0, 1e-6)
+        need_brake = (err_norm <= brake_trigger_dist)
+
+        k_min = 0.15                 # jangan sampai vel jadi 0 total
+        brake_max_s = max(1.0, 3.0 * self.brake_T)
 
         if need_brake or self._braking:
             now = self.get_clock().now()
@@ -718,31 +722,36 @@ class StateNode(Node):
                 self._brake_t0 = now
                 self._brake_qdot0 = qdot.copy()
 
-            T = max(self.brake_T, 1e-3)
             t = (now - self._brake_t0).nanoseconds * 1e-9
-            k = max(0.0, 1.0 - (t / T))  # linear ramp down
 
-            if k > 0.0:
-                # ramp velocity down while still moving (so position converges smoothly)
+            # kalau kelamaan tapi belum sampai, batal brake
+            if t > brake_max_s and err_norm > self.pos_tol:
+                self._braking = False
+                self._brake_t0 = None
+                # lanjut normal IK di bawah
+            else:
+                T = max(self.brake_T, 1e-3)
+                k = max(k_min, 1.0 - (t / T))     # clamp ke k_min
+
                 qdot_cmd = self._brake_qdot0 * k
                 self.q = np.clip(self.q + qdot_cmd * self.dt, self.q_min, self.q_max)
                 self._publish_targets(self.q, qdot_cmd, use_velocity=True)
+
+                # switch ke hold hanya kalau sudah benar-benar masuk tol
+                if err_norm <= self.pos_tol:
+                    self._publish_targets(
+                        self.q,
+                        np.zeros(4, dtype=float),
+                        use_velocity=False
+                    )
+                    self._braking = False
+                    self._brake_t0 = None
+                    self._brake_qdot0 = np.zeros(4, dtype=float)
+                    self._set_arm_at(True)
+                    return True
+
                 self._set_arm_at(False)
                 return False
-
-            # k == 0: switch to position hold (use_velocity=False) only when vel already ~0
-            self._publish_targets(self.q, np.zeros(4, dtype=float), use_velocity=False)
-
-            # stay here until "at" becomes true (settle inside pos_tol)
-            if at:
-                self._braking = False
-                self._brake_t0 = None
-                self._brake_qdot0 = np.zeros(4, dtype=float)
-                self._set_arm_at(True)
-                return True
-
-            self._set_arm_at(False)
-            return False
 
         # -------- Normal IK when not braking --------
         self._braking = False
