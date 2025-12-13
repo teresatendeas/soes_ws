@@ -103,6 +103,10 @@ class StateNode(Node):
         # Brake parameters (soft stop)
         self.declare_parameter('brake_time_s', 0.35)
 
+        # Velocity-stability gate (anti-cetek)
+        self.declare_parameter('vel_eps_rad_s', 0.20)
+        self.declare_parameter('stable_cycles', 5)
+
         # ----- Load arm params -----
         self.rate_hz  = float(self.get_parameter('rate_hz').value)
         self.dt       = 1.0 / self.rate_hz
@@ -135,6 +139,9 @@ class StateNode(Node):
         self.home_T = float(self.get_parameter('home_profile_time_s').value)
 
         self.brake_T = float(self.get_parameter('brake_time_s').value)
+
+        self.vel_eps = float(self.get_parameter('vel_eps_rad_s').value)
+        self.stable_cycles = int(self.get_parameter('stable_cycles').value)
 
         # =====================================================
         # ==================   ROS I/O   ======================
@@ -220,6 +227,9 @@ class StateNode(Node):
         self._braking = False
         self._brake_t0 = None
         self._brake_qdot0 = np.zeros(4, dtype=float)
+
+        # Stability gate (anti-cetek)
+        self._stable_count = 0
 
         # Timers
         self.timer_state = self.create_timer(0.05, self.tick)          # 20 Hz high-level
@@ -595,6 +605,9 @@ class StateNode(Node):
         self._brake_t0 = None
         self._brake_qdot0 = np.zeros(4, dtype=float)
 
+        # reset stability gate
+        self._stable_count = 0
+
         # reset HOME arrival log
         if new_phase == ArmPhase.HOME:
             self._home_done_logged = False
@@ -678,11 +691,7 @@ class StateNode(Node):
         """Cartesian IK step dengan S-curve speed scaling."""
         cur_xyz = self.fk_xyz(self.q)
         err = des_xyz - cur_xyz
-        if np.linalg.norm(err) <= self.pos_tol:
-            if self.last_within_tol is None:
-                self.last_within_tol = self.get_clock().now()
-        else:
-            self.last_within_tol = None
+        err_norm = float(np.linalg.norm(err))
 
         v = self.kp * err
         if xdot_ff is not None:
@@ -696,12 +705,22 @@ class StateNode(Node):
         limit = self.qdot_lim * speed_scale
         qdot = np.clip(qdot, -limit, limit)
 
-        at = (
-            self.last_within_tol is not None and
-            (self.get_clock().now() - self.last_within_tol) >= Duration(seconds=self.settle_s)
-        )
+        vel_norm = float(np.max(np.abs(qdot)))
 
-        # -------- Soft braking when "at" --------
+        # -------- Stability gate (anti-cetek) --------
+        pos_ok = err_norm <= self.pos_tol
+        vel_ok = vel_norm <= self.vel_eps
+
+        if pos_ok and vel_ok:
+            self._stable_count += 1
+        else:
+            self._stable_count = 0
+            self._braking = False
+            self._brake_t0 = None
+
+        at = (self._stable_count >= max(1, self.stable_cycles))
+
+        # -------- Soft braking ONLY when stable --------
         if at:
             now = self.get_clock().now()
 
@@ -719,21 +738,17 @@ class StateNode(Node):
             # IMPORTANT: keep updating internal q during braking
             self.q = np.clip(self.q + qdot_cmd * self.dt, self.q_min, self.q_max)
 
+            # IMPORTANT: keep velocity mode to avoid "cetek" on mode switch
+            self._publish_targets(self.q, qdot_cmd, use_velocity=True)
+
             if k <= 0.0:
-                # switch only after velocity is truly zero, and HOLD current q
-                self._publish_targets(self.q, np.zeros(4, dtype=float), use_velocity=False)
                 self._set_arm_at(True)
                 return True
             else:
-                # still braking: stay in velocity mode, NOT "at" yet
-                self._publish_targets(self.q, qdot_cmd, use_velocity=True)
                 self._set_arm_at(False)
                 return False
 
         # -------- Normal IK when not "at" --------
-        self._braking = False
-        self._brake_t0 = None
-
         self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
         self._publish_targets(self.q, qdot, use_velocity=True)
 
