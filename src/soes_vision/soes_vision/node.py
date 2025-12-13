@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+import time
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
@@ -56,6 +57,9 @@ class VisionNode(Node):
         self.declare_parameter('px_to_mm_ref', 0.1)
         self.declare_parameter('visualize', False)
 
+        # NEW: limit camera read FPS (applies to visualization loop)
+        self.declare_parameter('camera_fps_limit', 10.0)
+
         # extract
         self.rate = float(self.get_parameter('publish_rate_hz').value)
         self.frame_id = str(self.get_parameter('frame_id').value)
@@ -72,6 +76,13 @@ class VisionNode(Node):
         self.cam_index = int(self.get_parameter('camera_index').value)
         self.px_to_mm_ref = float(self.get_parameter('px_to_mm_ref').value)
         self.visualize = bool(self.get_parameter('visualize').value)
+
+        # NEW: fps limiter state
+        self.camera_fps_limit = float(self.get_parameter('camera_fps_limit').value)
+        if self.camera_fps_limit <= 0.0:
+            self.camera_fps_limit = 10.0
+        self._min_frame_period_s = 1.0 / self.camera_fps_limit
+        self._last_frame_monotonic = 0.0
 
         # flag for visualization overlay
         self.camera_phase = False
@@ -118,6 +129,7 @@ class VisionNode(Node):
         if self.visualize:
             self.vis_timer = self.create_timer(0.1, self._on_vis_timer)
             self.get_logger().info("[VISION] Visualization timer enabled.")
+            self.get_logger().info(f"[VISION] camera_fps_limit = {self.camera_fps_limit:.2f} fps")
 
         self.get_logger().info('soes_vision started.')
 
@@ -151,6 +163,12 @@ class VisionNode(Node):
             return
         if self.cap is None or not self.cap.isOpened():
             return
+
+        # NEW: FPS limiter (skip capture if too soon)
+        now_m = time.monotonic()
+        if (now_m - self._last_frame_monotonic) < self._min_frame_period_s:
+            return
+        self._last_frame_monotonic = now_m
 
         ret, frame = self.cap.read()
         if not ret or frame is None:
