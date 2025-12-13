@@ -701,78 +701,82 @@ class StateNode(Node):
 
         return at
 
-    def _ik_step(
-        self,
-        des_xyz: np.ndarray,
-        xdot_ff: Optional[np.ndarray] = None,
-        speed_scale: float = 1.0
-    ) -> bool:
-        """Cartesian IK step dengan S-curve speed scaling."""
-        cur_xyz = self.fk_xyz(self.q)
-        err = des_xyz - cur_xyz
-        err_norm = float(np.linalg.norm(err))
+def _ik_step(
+    self,
+    des_xyz: np.ndarray,
+    xdot_ff: Optional[np.ndarray] = None,
+    speed_scale: float = 1.0
+) -> bool:
 
-        v = self.kp * err
-        if xdot_ff is not None:
-            v = v + xdot_ff
+    cur_xyz = self.fk_xyz(self.q)
+    err = des_xyz - cur_xyz
+    err_norm = float(np.linalg.norm(err))
 
-        J = self.jacobian(self.q)
-        JJt = J @ J.T
-        qdot = J.T @ np.linalg.solve(JJt + (self.lmbda**2) * np.eye(3), v)
+    v = self.kp * err
+    if xdot_ff is not None:
+        v = v + xdot_ff
 
-        # S-curve speed scaling
-        limit = self.qdot_lim * speed_scale
-        qdot = np.clip(qdot, -limit, limit)
+    J = self.jacobian(self.q)
+    JJt = J @ J.T
+    qdot = J.T @ np.linalg.solve(
+        JJt + (self.lmbda**2) * np.eye(3),
+        v
+    )
 
-        vel_norm = float(np.max(np.abs(qdot)))
+    # speed limit
+    limit = self.qdot_lim * speed_scale
+    qdot = np.clip(qdot, -limit, limit)
 
-        # -------- Stability gate (anti-cetek) --------
-        pos_ok = err_norm <= self.pos_tol
-        vel_ok = vel_norm <= self.vel_eps
+    vel_norm = float(np.max(np.abs(qdot)))
 
-        if pos_ok and vel_ok:
-            self._stable_count += 1
-        else:
-            self._stable_count = 0
-            self._braking = False
-            self._brake_t0 = None
+    # ==============================
+    # ANTI-CETEK STABILITY GATE
+    # ==============================
+    pos_ok = err_norm <= self.pos_tol
+    vel_ok = vel_norm <= self.vel_eps
 
-        at = (self._stable_count >= max(1, self.stable_cycles))
+    if pos_ok and vel_ok:
+        self._stable_count += 1
+    else:
+        self._stable_count = 0
 
-        # -------- Soft braking ONLY when stable --------
-        if at:
-            now = self.get_clock().now()
+    at = self._stable_count >= max(1, self.stable_cycles)
 
-            if not self._braking:
-                self._braking = True
-                self._brake_t0 = now
-                self._brake_qdot0 = qdot.copy()
+    # ==============================
+    # HARD STOP WHEN STABLE
+    # ==============================
+    if at:
+        # DO NOT integrate anymore
+        qdot[:] = 0.0
 
-            T = max(self.brake_T, 1e-3)
-            t = (now - self._brake_t0).nanoseconds * 1e-9
-            k = max(0.0, 1.0 - (t / T))  # linear ramp down
+        # publish HOLD in velocity mode
+        self._publish_targets(
+            self.q,
+            qdot,
+            use_velocity=True
+        )
 
-            qdot_cmd = self._brake_qdot0 * k
+        self._set_arm_at(True)
+        return True
 
-            # keep updating internal q during braking
-            self.q = np.clip(self.q + qdot_cmd * self.dt, self.q_min, self.q_max)
+    # ==============================
+    # NORMAL IK STEP
+    # ==============================
+    self.q = np.clip(
+        self.q + qdot * self.dt,
+        self.q_min,
+        self.q_max
+    )
 
-            # keep velocity mode to avoid "cetek" on mode switch
-            self._publish_targets(self.q, qdot_cmd, use_velocity=True)
+    self._publish_targets(
+        self.q,
+        qdot,
+        use_velocity=True
+    )
 
-            if k <= 0.0:
-                self._set_arm_at(True)
-                return True
-            else:
-                self._set_arm_at(False)
-                return False
+    self._set_arm_at(False)
+    return False
 
-        # -------- Normal IK when not "at" --------
-        self.q = np.clip(self.q + qdot * self.dt, self.q_min, self.q_max)
-        self._publish_targets(self.q, qdot, use_velocity=True)
-
-        self._set_arm_at(False)
-        return False
 
     def _start_swirl(self):
         # siapkan spiral di sekitar center aktif
