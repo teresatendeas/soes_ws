@@ -145,11 +145,11 @@ class VisionNode(Node):
 
         self.get_logger().info('soes_vision started.')
 
-        # OPTIONAL: publish a known "reset/idle" state at startup
+        # publish a known "reset/idle" state at startup
         self._publish_reset_outputs(reason="startup")
 
     # ==========================================================
-    # NEW: publish reset values for /vision/quality and /vision/soes_done
+    # publish reset values for /vision/quality and /vision/soes_done
     # ==========================================================
     def _publish_reset_outputs(self, reason: str = ""):
         msg_q = VisionQuality()
@@ -159,12 +159,13 @@ class VisionNode(Node):
         msg_q.diameter_mm = [float(x) for x in self.diam_mean]
         msg_q.score = [0.0] * len(self.diam_mean)
 
-        # Reset meaning: no decision yet, so do not request human, and not done
+        # Reset meaning requested by you:
+        # needs_human=False and soes_done=True
         msg_q.needs_human = False
         self.quality_pub.publish(msg_q)
 
         done = Bool()
-        done.data = False
+        done.data = True  # <<< CHANGED: reset should publish True
         self.soess_done_pub.publish(done)
 
         if reason:
@@ -173,7 +174,7 @@ class VisionNode(Node):
             self.get_logger().warn("[VISION] Reset outputs published")
 
     # ==========================================================
-    # NEW: detect reset press (HIGH -> LOW) then reset outputs
+    # detect reset press (HIGH -> LOW) then reset outputs
     # ==========================================================
     def _on_esp_switch(self, msg: Bool):
         cur = bool(msg.data)
@@ -214,7 +215,7 @@ class VisionNode(Node):
         if self.cap is None or not self.cap.isOpened():
             return
 
-        # NEW: FPS limiter (skip capture if too soon)
+        # FPS limiter
         now_m = time.monotonic()
         if (now_m - self._last_frame_monotonic) < self._min_frame_period_s:
             return
@@ -231,10 +232,9 @@ class VisionNode(Node):
             vis = frame.copy()
             yolo_labels = []
 
-        # ===== highlight 3 top choux in BLUE =====
+        # highlight 3 top choux in BLUE
         if len(yolo_labels) > 0:
             top3 = sorted(yolo_labels, key=lambda t: t[2])[:3]
-
             for (_, cx, cy, w, h) in top3:
                 cx_i = int(cx)
                 cy_i = int(cy)
@@ -263,12 +263,10 @@ class VisionNode(Node):
         self.camera_phase = True
 
         if not bool(msg.data):
-            # If someone sends request False, treat it as a reset of outputs
             self._publish_reset_outputs(reason="/vision/request False")
             self.camera_phase = False
             return
 
-        model = load_yolo_model()
         if self.cap is None or not self.cap.isOpened():
             self.get_logger().error("Camera not opened.")
             self._publish_reset_outputs(reason="camera not opened on request")
