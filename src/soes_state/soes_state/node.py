@@ -428,14 +428,15 @@ class StateNode(Node):
                 self.get_logger().info("Vision is done")
                 if self.vision_done:
                     self.get_logger().info("Vision OK → ROLL_TRAY")
+                    self._enter(Phase.ROLL_TRAY)
                 else:
-                    self.get_logger().warn("Vision BAD → ROLL_TRAY (tetap jalan tray)")
-                self._enter(Phase.ROLL_TRAY)
+                    self.get_logger().warn("Vision BAD → IDLE")
+                    self._enter(Phase.IDLE)
                 return
 
             if self._elapsed() >= self.cam_to:
                 self.get_logger().warn("Camera timeout → ROLL_TRAY")
-                self._enter(Phase.ROLL_TRAY)
+                self._enter(Phase.IDLE)
                 return
 
         elif self.phase == Phase.ROLL_TRAY:
