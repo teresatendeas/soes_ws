@@ -106,6 +106,18 @@ class VisionNode(Node):
             qos
         )
 
+        # ==========================================================
+        # NEW: listen to RESET button from ESP (same as state node)
+        # When HIGH -> LOW, publish "reset" outputs for vision topics.
+        # ==========================================================
+        self._esp_switch_prev = True
+        self.esp_switch_sub = self.create_subscription(
+            Bool,
+            '/esp_switch_on',
+            self._on_esp_switch,
+            qos
+        )
+
         # open camera
         self.cap = cv2.VideoCapture(self.cam_index)
         if not self.cap.isOpened():
@@ -133,6 +145,46 @@ class VisionNode(Node):
 
         self.get_logger().info('soes_vision started.')
 
+        # OPTIONAL: publish a known "reset/idle" state at startup
+        self._publish_reset_outputs(reason="startup")
+
+    # ==========================================================
+    # NEW: publish reset values for /vision/quality and /vision/soes_done
+    # ==========================================================
+    def _publish_reset_outputs(self, reason: str = ""):
+        msg_q = VisionQuality()
+        msg_q.header.stamp = self.get_clock().now().to_msg()
+
+        # Keep lengths consistent
+        msg_q.diameter_mm = [float(x) for x in self.diam_mean]
+        msg_q.score = [0.0] * len(self.diam_mean)
+
+        # Reset meaning: no decision yet, so do not request human, and not done
+        msg_q.needs_human = False
+        self.quality_pub.publish(msg_q)
+
+        done = Bool()
+        done.data = False
+        self.soess_done_pub.publish(done)
+
+        if reason:
+            self.get_logger().warn(f"[VISION] Reset outputs published ({reason})")
+        else:
+            self.get_logger().warn("[VISION] Reset outputs published")
+
+    # ==========================================================
+    # NEW: detect reset press (HIGH -> LOW) then reset outputs
+    # ==========================================================
+    def _on_esp_switch(self, msg: Bool):
+        cur = bool(msg.data)
+        prev = self._esp_switch_prev
+        self._esp_switch_prev = cur
+
+        if prev and not cur:
+            # RESET pressed
+            self.camera_phase = False
+            self._publish_reset_outputs(reason="RESET pressed (esp_switch_on HIGH->LOW)")
+
     # -------------- periodic centers publisher --------------
     def _on_timer(self):
         now = self.get_clock().now().to_msg()
@@ -143,8 +195,6 @@ class VisionNode(Node):
         msg_c.frame_id = self.frame_id
 
         for i, (x, y, z) in enumerate(self.centers):
-            # DEBUG log supaya tidak spam, aktifkan via:
-            # --ros-args --log-level soes_vision:=debug
             self.get_logger().debug(
                 f"[VISION] Centers[{i}] = x={x:.3f} m, y={y:.3f} m, z={z:.3f} m"
             )
@@ -183,7 +233,6 @@ class VisionNode(Node):
 
         # ===== highlight 3 top choux in BLUE =====
         if len(yolo_labels) > 0:
-            # sort by cy ascending (paling atas dulu)
             top3 = sorted(yolo_labels, key=lambda t: t[2])[:3]
 
             for (_, cx, cy, w, h) in top3:
@@ -192,7 +241,6 @@ class VisionNode(Node):
                 r = int(max(w, h) / 2.0)
                 r = max(r, 5)
 
-                # BLUE highlight
                 cv2.circle(vis, (cx_i, cy_i), r, (255, 0, 0), 3)
                 cv2.putText(
                     vis, "TOP",
@@ -214,15 +262,23 @@ class VisionNode(Node):
         self.get_logger().info(f"[VISION] /vision/request received: {msg.data}")
         self.camera_phase = True
 
+        if not bool(msg.data):
+            # If someone sends request False, treat it as a reset of outputs
+            self._publish_reset_outputs(reason="/vision/request False")
+            self.camera_phase = False
+            return
+
         model = load_yolo_model()
         if self.cap is None or not self.cap.isOpened():
             self.get_logger().error("Camera not opened.")
+            self._publish_reset_outputs(reason="camera not opened on request")
             self.camera_phase = False
             return
 
         ret, frame = self.cap.read()
         if not ret or frame is None:
             self.get_logger().error("Failed to read frame.")
+            self._publish_reset_outputs(reason="frame read failed on request")
             self.camera_phase = False
             return
 
@@ -233,23 +289,18 @@ class VisionNode(Node):
             f"[VISION] Detection result: {len(good_cnts)} contours, {len(yolo_labels)} YOLO boxes."
         )
 
-        # no choux detected
         no_choux = (len(good_cnts) == 0 and len(yolo_labels) == 0)
         if no_choux:
             self.get_logger().error("VISION request: no choux detected.")
 
-        # --- pilih 3 choux paling atas dari YOLO (cy paling kecil) ---
         top3_labels = sorted(yolo_labels, key=lambda t: t[2])[:3]
 
-        # --- log posisi 3 choux paling atas (pixel) ---
         for i, (_, cx, cy, bw, bh) in enumerate(top3_labels):
             self.get_logger().info(
                 f"[VISION] Choux {i+1} pos_px = (cx={cx:.1f}, cy={cy:.1f}), "
                 f"bbox = (w={bw:.1f}, h={bh:.1f})"
             )
 
-        # diameter estimation hanya pakai top 3 (kalau ada),
-        # sisanya fallback ke mean agar panjang tetap = len(self.diam_mean)
         diam_mm = []
         for i in range(len(self.diam_mean)):
             if i < len(top3_labels):
@@ -260,7 +311,6 @@ class VisionNode(Node):
             else:
                 diam_mm.append(float(self.diam_mean[i]))
 
-        # --- log diameter per choux ---
         for i, d in enumerate(diam_mm):
             self.get_logger().info(f"[VISION] Choux {i+1} diameter_est = {d:.2f} mm")
 
@@ -279,7 +329,6 @@ class VisionNode(Node):
         if no_choux:
             msg_q.needs_human = True
         else:
-            # kalau 3 paling atas ukurannya mirip (range kecil), needs_human = False
             msg_q.needs_human = (max(msg_q.diameter_mm) - min(msg_q.diameter_mm)) > self.tol
 
         self.get_logger().info(
