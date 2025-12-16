@@ -15,13 +15,13 @@ def generate_launch_description():
             output='screen',
             parameters=[os.path.join(cfg, 'state.yaml')],
         ),
-        # Node(
-        #     package='soes_vision',
-        #     executable='vision_node',
-        #     name='soes_vision',
-        #     output='screen',
-        #     parameters=[os.path.join(cfg, 'vision.yaml')],
-        # ),
+        Node(
+            package='soes_vision',
+            executable='vision_node',
+            name='soes_vision',
+            output='screen',
+            parameters=[os.path.join(cfg, 'vision.yaml')],
+        ),
         Node(
             package='soes_state',                      # <— same package
             executable='i2c_bridge',                   # <— new entry point
