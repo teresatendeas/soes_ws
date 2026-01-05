@@ -6,14 +6,14 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from smbus2 import SMBus, i2c_msg
 
-from soes_msgs.msg import PumpCmd, JointTargets, RollerCmd
+from soes_msgs.msg import PumpCmd, JointTargets, RollerCmd, VisionQuality
 from std_msgs.msg import Bool
 
 STATUS_SWITCH_BIT = 0x01  # bit 0 in ESP32 status byte = switch ON/OFF
 STATUS_PAUSE_BIT  = 0x02  # bit 1 in ESP32 status byte = PAUSE
-STATUS_SOES_BIT   = 0x04  # bit 2 in ESP32 status byte = SOES_DONE (new)
+STATUS_SOES_BIT   = 0x04  # bit 2 in ESP32 status byte = (reserved / optional)
 
-# New command: SOES status from Jetson -> ESP
+# Command: needs_human status from Jetson -> ESP
 CMD_SOES_STATUS = 0x20
 
 
@@ -49,9 +49,11 @@ class I2CBridge(Node):
         self.create_subscription(JointTargets, '/arm/joint_targets', self.on_joint, qos)
         self.create_subscription(RollerCmd, '/roller/cmd', self.on_roller, qos)
 
-        # Subscribe to SOES decision published by VisionNode
-        # Topic: /vision/soes_done (Bool). When False -> needs human -> trigger LED+buzzer on ESP
-        self.create_subscription(Bool, '/vision/soes_done', self.on_soes_done, qos)
+        # CHANGED: Subscribe to VisionQuality instead of /vision/soes_done
+        # We will send needs_human to ESP:
+        #   needs_human=True  -> trigger LED+buzzer on ESP
+        #   needs_human=False -> LED+buzzer off
+        self.create_subscription(VisionQuality, '/vision/quality', self.on_quality, qos)
 
         # Publisher for ESP switch status (ESP -> Jetson reads)
         self.switch_pub = self.create_publisher(Bool, '/esp_switch_on', 10)
@@ -157,21 +159,28 @@ class I2CBridge(Node):
             )
 
     # -------------------------------------------------------------------------
-    #  SOES status from Vision (write-only)
+    #  VisionQuality -> needs_human (write-only)
     # -------------------------------------------------------------------------
-    def on_soes_done(self, msg: Bool):
-        # Jika paused, abaikan command ini
+    def on_quality(self, msg: VisionQuality):
+        """
+        CHANGED:
+        Send needs_human instead of soes_done.
+
+        Payload:
+          1 -> needs_human True  (turn ON LED/buzzer on ESP)
+          0 -> needs_human False (turn OFF LED/buzzer on ESP)
+        """
         if self.paused:
             if self.debug:
-                self.get_logger().debug('ESP paused -> skipping soes status command')
+                self.get_logger().debug('ESP paused -> skipping needs_human command')
             return
 
-        soes_done_u8 = 1 if msg.data else 0
-        frame = struct.pack('<BB', CMD_SOES_STATUS, soes_done_u8)
+        needs_human_u8 = 1 if bool(msg.needs_human) else 0
+        frame = struct.pack('<BB', CMD_SOES_STATUS, needs_human_u8)
         self._i2c_send_raw(frame)
 
         if self.debug:
-            self.get_logger().info(f'I2C SOES (0x20) -> soes_done={soes_done_u8}')
+            self.get_logger().info(f'I2C SOES (0x20) -> needs_human={needs_human_u8}')
 
     # -------------------------------------------------------------------------
     #  Low-level I2C write
