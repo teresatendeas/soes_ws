@@ -50,7 +50,7 @@ soes_state:
     R0: 0.025
     turns: 3
     alpha: -0.03
-    height: 0.08
+    height: 0.04
     omega: 2.5
 
     move_profile_time_s: 1.0   # smoother move to cupcake
