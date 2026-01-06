@@ -165,7 +165,7 @@ class VisionNode(Node):
         self.quality_pub.publish(msg_q)
 
         done = Bool()
-        done.data = False
+        done.data = True  # <<< CHANGED: reset should publish True
         self.soess_done_pub.publish(done)
 
         if reason:
