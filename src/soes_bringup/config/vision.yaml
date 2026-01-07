@@ -3,7 +3,7 @@ soes_vision:
 
     # Camera settings
     camera_index: 0          # dipakai di cv2.VideoCapture
-    px_to_mm_ref: 0.1        # scaling lebar bbox YOLO → diameter mm (sementara)
+    px_to_mm_ref: 0.0028        # scaling lebar bbox YOLO → diameter mm (sementara)
 
     # NEW: limit FPS untuk loop visualize (cv2.imshow)
     camera_fps_limit: 1.0   # fps max saat visualize=true
@@ -33,6 +33,6 @@ soes_vision:
 
     # Jika max(d) - min(d) > tol → needs_human = True
     # Catatan: di code, ini dibandingkan dengan "diameter_mm" hasil estimasi.
-    quality_tolerance_mm: 3500.0  # IN PIXELS
+    quality_tolerance_mm: 1.5
 
     visualize: true
